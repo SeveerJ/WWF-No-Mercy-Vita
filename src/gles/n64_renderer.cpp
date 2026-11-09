@@ -827,7 +827,6 @@ struct Renderer::Impl {
     uint64_t state_serial = 1, prepared_serial = 0;
     TexInfo prepared_t0, prepared_t1;
     void prepare(bool rect, bool is_fill_or_copy, TexInfo& t0, TexInfo& t1) {
-        ProfScope ps(3);
         // Nothing but vertices and triangles since the last call: same state.
         if (!rect && prepared_serial == state_serial) { t0 = prepared_t0; t1 = prepared_t1; return; }
         uint32_t cyc = cycle_type();
