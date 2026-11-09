@@ -57,6 +57,7 @@ void nm::init_settings() {
         std::string k = trim(line.substr(0, eq)), v = trim(line.substr(eq + 1));
         if (k == "resolution") g_settings.resolution = v;
         else if (k == "show_fps") g_settings.show_fps = to_bool(v);
+        else if (k == "gfx_profile") g_settings.gfx_profile = to_bool(v);
         else if (k == "perf_overlay") g_settings.perf_overlay = to_bool(v);
         else if (k == "frameskip") g_settings.frameskip = std::atoi(v.c_str()) < 0 ? 0 : std::atoi(v.c_str()) > 3 ? 3 : std::atoi(v.c_str());
         else if (k == "audio_microcode") g_settings.audio_microcode = v;

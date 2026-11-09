@@ -59,7 +59,7 @@ namespace {
     }
 
     // ---- Input script ----
-    struct Entry { uint64_t p0, p1; uint16_t buttons; };
+    struct Entry { uint64_t p0, p1; uint16_t buttons; int pad; };
     std::vector<Entry> script;
     void load_script(const char* path) {
         std::ifstream f(path);
@@ -69,22 +69,22 @@ namespace {
             std::istringstream is(line);
             Entry e{};
             std::string hex;
-            if (is >> e.p0 >> e.p1 >> hex) { e.buttons = (uint16_t)std::stoul(hex, nullptr, 16); script.push_back(e); }
+            if (is >> e.p0 >> e.p1 >> hex) { e.buttons = (uint16_t)std::stoul(hex, nullptr, 16); if (!(is >> e.pad)) e.pad = 0; script.push_back(e); }
         }
         printf("[headless] input script: %zu entries\n", script.size());
     }
     void poll_input() { polls++; }
     bool get_input(int n, uint16_t* buttons, float* x, float* y) {
         *x = 0; *y = 0; *buttons = 0;
-        if (n != 0) return true;
         uint64_t p = polls.load();
-        for (auto& e : script) if (p >= e.p0 && p <= e.p1) *buttons |= e.buttons;
+        for (auto& e : script) if (e.pad == n && p >= e.p0 && p <= e.p1) *buttons |= e.buttons;
         return true;
     }
     void set_rumble(int, bool) {}
     ultramodern::input::connected_device_info_t get_connected_device_info(int n) {
-        // Same as the Vita: one controller, with the emulated Rumble Pak.
-        if (n != 0) return { .connected_device = ultramodern::input::Device::None, .connected_pak = ultramodern::input::Pak::None };
+        // As the Vita: one controller with the emulated Rumble Pak (NM_PADS=2 adds a second for scripts).
+        static const int pads = getenv("NM_PADS") ? atoi(getenv("NM_PADS")) : 1;
+        if (n >= pads) return { .connected_device = ultramodern::input::Device::None, .connected_pak = ultramodern::input::Pak::None };
         return { .connected_device = ultramodern::input::Device::Controller, .connected_pak = ultramodern::input::Pak::RumblePak };
     }
 

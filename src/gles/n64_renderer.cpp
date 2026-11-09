@@ -145,6 +145,18 @@ struct GLCache {
     bool attribs_on = false;
 };
 
+// NM_GLES_PROFILE=1: time spent per renderer stage, printed every 300 display lists.
+static bool g_prof = getenv("NM_GLES_PROFILE") != nullptr;
+void set_profiling(bool on) { g_prof = on; }
+static double g_prof_ms[8];
+static uint64_t g_break[8]; // why batches were split: shader, texture, prim, env, scissor, blend/depth/cull, misc
+static const char* g_prof_names[8] = { "vertices", "textures", "gl submit", "prepare", "other" };
+struct ProfScope {
+    int k; std::chrono::steady_clock::time_point t0;
+    explicit ProfScope(int k) : k(k) { if (g_prof) t0 = std::chrono::steady_clock::now(); }
+    ~ProfScope() { if (g_prof) g_prof_ms[k] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); }
+};
+
 struct Renderer::Impl {
     uint8_t* rdram;
     Config cfg;
@@ -179,11 +191,12 @@ struct Renderer::Impl {
     Tile tiles[8];
     TmemLoad loads[512];
     uint16_t tlut[256] = {};
-    uint32_t tlut_serial = 0;   // bumped on every G_LOADTLUT
+    uint32_t tlut_serial = 0;   // hash of the palette, updated on every G_LOADTLUT
     // Textures already looked up in this display list, keyed by everything that decides their
     // contents except the RDRAM bytes: hashing the source texels is done once per list, not per draw.
     struct MemoEntry { GLuint id; int w, h; };
-    std::unordered_map<uint64_t, MemoEntry> tex_memo;
+    std::unordered_map<uint64_t, MemoEntry> tex_memo; // cleared each frame (present) and on a new colour image
+    uint32_t memo_cimg = ~0u;
 
     // GL objects
     std::unordered_map<uint64_t, ShaderProgram> programs;
@@ -405,7 +418,8 @@ struct Renderer::Impl {
 
     void bind_color_image() {
         leave_framebuffer();
-        tex_memo.clear(); // a new target may be sampled as a texture later in this list
+        // A different target may be sampled as a texture afterwards: forget looked-up textures.
+        if (cimg_addr != memo_cimg) { tex_memo.clear(); memo_cimg = cimg_addr; }
         if (cimg_addr == zimg_addr) return; // depth image: handled by fills
         Framebuffer* f = get_framebuffer(cimg_addr, cimg_width);
         current_fb = f;
@@ -532,6 +546,7 @@ struct Renderer::Impl {
 
     // Returns the GL texture for tile index ti, creating/uploading it if needed.
     GLuint texture_for_tile(int ti, int& w_out, int& h_out) {
+        ProfScope ps(1);
         const Tile& t = tiles[ti & 7];
         const TmemLoad& L = loads[t.tmem & 511];
         int w, h;
@@ -611,6 +626,7 @@ struct Renderer::Impl {
                 tex_filter.erase(it->second.id);
                 for (auto& t : gl.tex) if (t == it->second.id) t = ~0u;
                 glDeleteTextures(1, &it->second.id);
+                tex_memo.clear(); // it may name the deleted texture
                 it = textures.erase(it);
             }
             else ++it;
@@ -757,6 +773,7 @@ struct Renderer::Impl {
 
     void flush() {
         if (batch.empty()) return;
+        ProfScope ps(2);
         if (!current_fb) { batch.clear(); return; }
         const DrawKey& k = batch_key;
         const ShaderProgram* p = k.shader;
@@ -804,10 +821,13 @@ struct Renderer::Impl {
     }
 
     // Builds the draw state for the current RDP settings; flushes if it differs from the batch's.
+    // State commands (geometry mode, other modes, combiner, scissor) don't flush by themselves:
+    // everything they affect is in the DrawKey, so a batch only ends when the state really changes.
     struct TexInfo { GLuint id = 0; int w = 1, h = 1; };
     uint64_t state_serial = 1, prepared_serial = 0;
     TexInfo prepared_t0, prepared_t1;
     void prepare(bool rect, bool is_fill_or_copy, TexInfo& t0, TexInfo& t1) {
+        ProfScope ps(3);
         // Nothing but vertices and triangles since the last call: same state.
         if (!rect && prepared_serial == state_serial) { t0 = prepared_t0; t1 = prepared_t1; return; }
         uint32_t cyc = cycle_type();
@@ -849,7 +869,19 @@ struct Renderer::Impl {
         memcpy(k.prim, prim, sizeof(prim));
         memcpy(k.env, env, sizeof(env));
         k.misc[0] = prim_lod; k.misc[1] = 0.0f; k.misc[2] = std::max(blend_col[3], 1.0f / 255.0f); k.misc[3] = 0;
-        if (!(k == batch_key)) { flush(); batch_key = k; }
+        if (!(k == batch_key)) {
+            if (g_prof && !batch.empty()) {
+                const DrawKey& o = batch_key;
+                if (k.shader != o.shader) g_break[0]++;
+                else if (k.tex0 != o.tex0 || k.tex1 != o.tex1 || k.linear0 != o.linear0) g_break[1]++;
+                else if (memcmp(k.prim, o.prim, sizeof(k.prim))) g_break[2]++;
+                else if (memcmp(k.env, o.env, sizeof(k.env))) g_break[3]++;
+                else if (memcmp(k.sc, o.sc, sizeof(k.sc))) g_break[4]++;
+                else if (k.blend != o.blend || k.depth != o.depth || k.cull != o.cull) g_break[5]++;
+                else g_break[6]++;
+            }
+            flush(); batch_key = k;
+        }
         if (!rect) { prepared_serial = state_serial; prepared_t0 = t0; prepared_t1 = t1; }
         else prepared_serial = 0;
     }
@@ -956,6 +988,7 @@ struct Renderer::Impl {
     }
 
     void load_vertices(uint32_t addr, int first, int count) {
+        ProfScope ps(0);
         update_mvp();
         const float (&mv)[4][4] = mv_stack[mv_depth];
         float W = fb_w(), H = fb_h();
@@ -1211,7 +1244,6 @@ struct Renderer::Impl {
                     break;
                 }
                 case 0xD9:                                                  // G_GEOMETRYMODE
-                    flush();
                     geometry_mode = (geometry_mode & (w0 & 0xFFFFFF)) | w1;
                     break;
                 case 0xDA: {                                                // G_MTX
@@ -1285,13 +1317,11 @@ struct Renderer::Impl {
                     int len = (w0 & 0xFF) + 1, shift = 32 - ((w0 >> 8) & 0xFF) - len;
                     if (shift < 0) shift = 0;
                     uint32_t mask = (len >= 32 ? 0xFFFFFFFFu : ((1u << len) - 1)) << shift;
-                    flush();
                     if (op == 0xE2) othermode_l = (othermode_l & ~mask) | (w1 & mask);
                     else othermode_h = (othermode_h & ~mask) | (w1 & mask);
                     break;
                 }
                 case 0xEF:                                                  // G_RDPSETOTHERMODE
-                    flush();
                     othermode_h = w0 & 0xFFFFFF;
                     othermode_l = w1;
                     break;
@@ -1308,7 +1338,6 @@ struct Renderer::Impl {
                 }
                 case 0xE6: case 0xE7: case 0xE8: case 0xE9: break;          // syncs
                 case 0xED: {                                                // G_SETSCISSOR
-                    flush();
                     scissor[0] = ((w0 >> 12) & 0xFFF) / 4; scissor[1] = (w0 & 0xFFF) / 4;
                     scissor[2] = ((w1 >> 12) & 0xFFF) / 4; scissor[3] = (w1 & 0xFFF) / 4;
                     break;
@@ -1321,7 +1350,7 @@ struct Renderer::Impl {
                     uint32_t src = timg_addr + ((w0 >> 14) & 0x3FF) * 2;
                     for (int i = 0; i < count && start + i < 256; i++)
                         if (start + i >= 0) tlut[start + i] = r16(src + i * 2);
-                    tlut_serial++;
+                    tlut_serial = (uint32_t)XXH3_64bits(tlut, sizeof(tlut)); // contents, so reloading the same palette still hits
                     break;
                 }
                 case 0xF2: {                                                // G_SETTILESIZE
@@ -1371,7 +1400,6 @@ struct Renderer::Impl {
                     env[0] = (w1 >> 24) / 255.0f; env[1] = ((w1 >> 16) & 0xFF) / 255.0f; env[2] = ((w1 >> 8) & 0xFF) / 255.0f; env[3] = (w1 & 0xFF) / 255.0f;
                     break;
                 case 0xFC:                                                  // G_SETCOMBINE
-                    flush();
                     combine_w0 = w0 & 0xFFFFFF; combine_w1 = w1;
                     break;
                 case 0xFD:                                                  // G_SETTIMG
@@ -1406,12 +1434,23 @@ void Renderer::process_dl(uint32_t dl_addr) {
     Impl& I = *impl;
     I.stats = {};
     I.frame++;
-    I.tex_memo.clear();
     memset(I.segments, 0, sizeof(I.segments));
     static const long trace_from = getenv("TNT_GLES_TRACE_FRAME") ? atol(getenv("TNT_GLES_TRACE_FRAME")) : -1;
     I.tracing = trace_from >= 0 && (long)I.frame >= trace_from && !I.trace_done;
     I.run(dl_addr);
     if (I.op_stats && (I.frame % 120) == 0) I.print_op_stats();
+    if (g_prof) {
+        static double total = 0; static int n = 0;
+        total += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (++n == 600) {
+            printf("[gles-prof] per list: total %.3f ms |", total / n);
+            for (int k = 0; k < 4; k++) printf(" %s %.3f", g_prof_names[k], g_prof_ms[k] / n);
+            printf(" | splits/list: shader %.1f tex %.1f prim %.1f env %.1f scissor %.1f mode %.1f misc %.1f\n",
+                g_break[0] / 600.0, g_break[1] / 600.0, g_break[2] / 600.0, g_break[3] / 600.0, g_break[4] / 600.0, g_break[5] / 600.0, g_break[6] / 600.0);
+            memset(g_break, 0, sizeof(g_break));
+            memset(g_prof_ms, 0, sizeof(g_prof_ms)); total = 0; n = 0;
+        }
+    }
     if (!I.cfg.dump_dir.empty()) I.save_backgrounds();
     if (I.tracing && I.stats.triangles) I.trace_done = true;
     I.tracing = false;
@@ -1425,6 +1464,7 @@ void Renderer::process_dl(uint32_t dl_addr) {
 
 bool Renderer::present(uint32_t vi_origin) {
     Impl& I = *impl;
+    I.tex_memo.clear(); // textures are re-checked against RDRAM once per shown frame
     I.flush();
     uint32_t origin = vi_origin & 0x7FFFFF;
     Framebuffer* best = nullptr;

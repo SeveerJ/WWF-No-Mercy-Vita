@@ -242,8 +242,10 @@ namespace {
         { std::lock_guard lock{ audio_mutex }; queued_out = ring_count + GRAIN; }
         uint64_t queued = queued_out * in_rate / OUT_RATE;
         uint64_t per_vi = in_rate / 60, headroom = per_vi * uint64_t(headroom_vis);
-        uint64_t reported = queued > headroom ? queued - headroom : 0;
-        return (size_t)std::min<uint64_t>(reported, per_vi);
+        // The real amount queued (less some headroom, so the game keeps a little extra). Capping it
+        // at one VI, as Tetris did, made No Mercy produce ~15% more sound than plays: wasted sound
+        // processor time, and the overflow was dropped (audible skips).
+        return (size_t)(queued > headroom ? queued - headroom : 0);
     }
     void set_frequency(uint32_t freq) {
         printf("[vita] game audio rate %u Hz\n", freq);
@@ -396,6 +398,7 @@ namespace {
             // No Mercy spreads a frame over several display lists, so draw into off-screen
             // images and show the one the VI points at.
             cfg.direct_to_screen = false;
+            n64gfx::set_profiling(nm::settings().gfx_profile);
             renderer = std::make_unique<n64gfx::Renderer>(rdram, cfg);
             return true;
         }

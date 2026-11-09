@@ -272,6 +272,51 @@ index aad9c57..0350019 100644
  #else
      // munmap returns -1 on failure.
      free_failed = (munmap(rdram, allocation_size) == -1);
+diff --git a/librecomp/src/save_backups.cpp b/librecomp/src/save_backups.cpp
+index 0751323..6a90399 100644
+--- a/librecomp/src/save_backups.cpp
++++ b/librecomp/src/save_backups.cpp
+@@ -7,6 +7,22 @@
+ #include <mutex>
+ #include <system_error>
+ 
++#if defined(__vita__)
++#include <fstream>
++// newlib on the PS Vita can't do std::filesystem::copy_file ("Invalid argument"): copy through streams.
++static void nm_copy_file(const std::filesystem::path& from, const std::filesystem::path& to, std::error_code& ec) {
++    ec.clear();
++    std::ifstream in(from, std::ios::binary);
++    std::ofstream out(to, std::ios::binary | std::ios::trunc);
++    if (!in || !out) { ec = std::make_error_code(std::errc::io_error); return; }
++    out << in.rdbuf();
++    if (!out) ec = std::make_error_code(std::errc::io_error);
++}
++#define NM_COPY_FILE(from, to, ec) nm_copy_file(from, to, ec)
++#else
++#define NM_COPY_FILE(from, to, ec) std::filesystem::copy_file(from, to, std::filesystem::copy_options::overwrite_existing, ec)
++#endif
++
+ namespace recomp {
+     namespace save_backups {
+         // Backups (and the pending-restore note) of all files in one save folder.
+@@ -72,7 +88,7 @@ namespace recomp {
+ 
+             std::filesystem::create_directories(folder, ec);
+             const std::filesystem::path target = folder / backup_file_name(save_name, when);
+-            std::filesystem::copy_file(save_file, target, std::filesystem::copy_options::overwrite_existing, ec);
++            NM_COPY_FILE(save_file, target, ec);
+             if (ec) {
+                 fprintf(stderr, "[saves] backup of %s failed: %s\n", save_name.c_str(), ec.message().c_str());
+                 return false;
+@@ -186,7 +202,7 @@ namespace recomp {
+ 
+             // Keep what's there now, so the restore can be undone from the same menu.
+             backup_save_file(entry->save_file, BackupReason::BeforeRestore);
+-            std::filesystem::copy_file(entry->backup_file, entry->save_file, std::filesystem::copy_options::overwrite_existing, ec);
++            NM_COPY_FILE(entry->backup_file, entry->save_file, ec);
+             if (ec) {
+                 fprintf(stderr, "[saves] restore of %s failed: %s\n", entry->backup_file.filename().string().c_str(), ec.message().c_str());
+                 return {};
 diff --git a/librecomp/src/si.cpp b/librecomp/src/si.cpp
 index a7fb08b..3b0fd6a 100644
 --- a/librecomp/src/si.cpp

@@ -27,6 +27,9 @@ namespace n64gfx {
         double dl_ms = 0;              // CPU time spent in the last process_dl()
     };
 
+    // Times the renderer's stages and logs them every 600 display lists (also NM_GLES_PROFILE=1).
+    void set_profiling(bool on);
+
     class Renderer {
     public:
         Renderer(uint8_t* rdram, const Config& config);
