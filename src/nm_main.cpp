@@ -146,6 +146,9 @@ int main(int argc, char** argv) {
     wcw_pak_separate_backing = true;
     extern bool wcw_ai_accurate_freq;
     wcw_ai_accurate_freq = true;
+    // [nm] The pak in port 1: a plain Rumble Pak unless settings.ini asks for the PC's hybrid one.
+    extern bool wcw_pak_rumble_only;
+    wcw_pak_rumble_only = nm::settings().pak != "hybrid";
 
     recomp::GameEntry game{};
     game.rom_hash = 0x0455F72A0F9FF778ULL;          // XXH3-64 of the USA Rev 1 ROM

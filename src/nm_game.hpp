@@ -34,7 +34,8 @@ namespace nm {
         int volume = 100;                   // percent
         int audio_latency = 2;              // VIs of extra audio kept queued
         int frameskip = 0;
-        std::string audio_microcode = "auto"; // auto (hle on the Vita), hle, recompiled                  // draw 1 of every (frameskip+1) frames; 0 = draw all
+        std::string audio_microcode = "auto"; // auto (hle on the Vita), hle, recompiled
+        std::string pak = "rumble";         // rumble (a Rumble Pak, always) or hybrid (PC behaviour: Controller + Rumble Pak)                  // draw 1 of every (frameskip+1) frames; 0 = draw all
     };
     Settings& settings();
     void init_settings();

@@ -318,10 +318,21 @@ index 0751323..6a90399 100644
                  fprintf(stderr, "[saves] restore of %s failed: %s\n", entry->backup_file.filename().string().c_str(), ec.message().c_str());
                  return {};
 diff --git a/librecomp/src/si.cpp b/librecomp/src/si.cpp
-index a7fb08b..b9b9b01 100644
+index a7fb08b..1539392 100644
 --- a/librecomp/src/si.cpp
 +++ b/librecomp/src/si.cpp
-@@ -234,7 +234,21 @@ static void wcw_process_pif() {
+@@ -130,6 +130,10 @@ static void wcw2k_pak_flush() {
+ // forwarded to the host controller via ultramodern::input::set_rumble. Save-region reads
+ // and writes are honored regardless of identity, so saves can never be lost to rumble.
+ static bool wcw_pak_is_rumble = false;
++// [nm vita] true: the pak is only ever a Rumble Pak (as if one were plugged in), so the game
++// never sees it change type and stops asking for one. The Controller Pak is then absent: No
++// Mercy saves to the cartridge, and only uses a Controller Pak to copy Superstar data.
++bool wcw_pak_rumble_only = false;
+ 
+ // Bounded diagnostic log of bank/ID-region pak traffic (dedup'd), to observe the game's
+ // accessory-detect and rumble-probe sequences.
+@@ -234,7 +238,21 @@ static void wcw_process_pif() {
      // and the controller list). The normal poller is osContStartReadData, which this game
      // never calls (raw-SI path) — without this poll the cache stays empty forever and all
      // input reads as neutral.
@@ -344,7 +355,32 @@ index a7fb08b..b9b9b01 100644
      // osContGetReadData reads current host input (already converted to N64 stick range) and
      // sets err_no != 0 for absent controllers.
      osContGetReadData(pads);
-@@ -333,7 +347,8 @@ static void wcw_process_pif() {
+@@ -291,7 +309,11 @@ static void wcw_process_pif() {
+             // tx = cmd, addr_hi, addr_lo; low 5 address bits are an address CRC (ignored).
+             uint16_t addr = (uint16_t)((pif_ram[i + 3] << 8) | pif_ram[i + 4]);
+             uint32_t offset = addr & 0xFFE0u;
+-            if (offset < 0x8000) {
++            if (wcw_pak_rumble_only) {
++                // Rumble Pak: 0x80s in its ID window, nothing anywhere else.
++                memset(res, (offset >= 0x8000 && offset < 0x9000) ? 0x80 : 0x00, 32);
++            }
++            else if (offset < 0x8000) {
+                 wcw_pak_ensure_formatted();
+                 wcw_pak_read(res, offset, 32);           // pak RAM <- pak backing
+             }
+@@ -311,7 +333,10 @@ static void wcw_process_pif() {
+             uint16_t addr = (uint16_t)((pif_ram[i + 3] << 8) | pif_ram[i + 4]);
+             uint32_t offset = addr & 0xFFE0u;
+             const uint8_t* data = &pif_ram[i + 5];
+-            if (offset < 0x8000) {
++            if (wcw_pak_rumble_only && offset < 0xC000) {
++                // Rumble Pak: data and ID writes go nowhere (the pak image file is never touched).
++            }
++            else if (offset < 0x8000) {
+                 wcw_pak_ensure_formatted();              // format first so the game's write wins
+                 wcw_pak_write(data, offset, 32);         // persists on block completion (below)
+             }
+@@ -333,7 +358,8 @@ static void wcw_process_pif() {
                  if (want_rumble != wcw_pak_is_rumble) {
                      wcw_pak_is_rumble = want_rumble;
                      if (!want_rumble) ultramodern::input::set_rumble(0, false);
