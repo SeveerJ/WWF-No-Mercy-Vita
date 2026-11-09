@@ -162,7 +162,7 @@ namespace {
         for (int y = OUT_H - 1; y >= 0; y--)
             for (int x = 0; x < OUT_W; x++) fwrite(&px[(y * OUT_W + x) * 4], 1, 3, f);
         fclose(f);
-        printf("[headless] wrote %s (dl %llu, t=%.1fs)\n", name, (unsigned long long)dl_count.load(),
+        printf("[headless] wrote %s (dl %llu, polls %llu, t=%.1fs)\n", name, (unsigned long long)dl_count.load(), (unsigned long long)polls.load(),
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count());
     }
 
