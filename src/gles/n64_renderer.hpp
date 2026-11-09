@@ -23,7 +23,7 @@ namespace n64gfx {
 
     struct Stats {
         uint32_t triangles = 0, rects = 0, draw_calls = 0, texture_uploads = 0, shaders = 0;
-        uint32_t textures_cached = 0, framebuffers = 0, unknown_commands = 0, writebacks = 0;
+        uint32_t textures_cached = 0, framebuffers = 0, unknown_commands = 0, writebacks = 0, fb_textures = 0;
         double dl_ms = 0;              // CPU time spent in the last process_dl()
     };
 

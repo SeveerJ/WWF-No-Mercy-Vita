@@ -292,7 +292,7 @@ struct Renderer::Impl {
         int height = (cfg.screen_height > 0 && width >= 320) ? cfg.screen_height : width * 3 / 4;
         for (auto& f : framebuffers) if (f.addr == addr && f.width == width) return &f;
         Framebuffer f;
-        f.addr = addr; f.width = width; f.height = height;
+        f.addr = addr; f.width = width; f.height = height; f.siz = cimg_siz;
         glGenTextures(1, &f.tex);
         glBindTexture(GL_TEXTURE_2D, f.tex);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width * cfg.scale, height * cfg.scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
@@ -499,11 +499,17 @@ struct Renderer::Impl {
         return tlut_type == 3 ? ia16(c) : rgba5551(c);
     }
 
+    // With the TLUT enabled (other mode H), the RDP looks every 4- and 8-bit texel up in the
+    // palette, whatever format the tile says: No Mercy draws its colour logos and UI as "IA4" tiles.
+    bool tlut_on() const { return ((othermode_h >> G::TEXTLUT_SHIFT) & 3) >= 2; }
+    bool tile_uses_tlut(const Tile& t) const { return t.siz <= G::B8 && (t.fmt == G::CI || tlut_on()); }
+
     uint32_t decode_texel(const Tile& t, uint32_t addr, int bit) const {
         switch (t.siz) {
             case G::B4: {
                 uint8_t byte = r8(addr);
                 uint8_t v = bit ? (byte & 0xF) : (byte >> 4);
+                if (tlut_on()) return palette_color((t.palette << 4) | v);
                 switch (t.fmt) {
                     case G::CI: return palette_color((t.palette << 4) | v);
                     case G::IA: { uint32_t i = (v >> 1) * 255 / 7, a = (v & 1) ? 255 : 0; return i | (i << 8) | (i << 16) | (a << 24); }
@@ -512,6 +518,7 @@ struct Renderer::Impl {
             }
             case G::B8: {
                 uint8_t v = r8(addr);
+                if (tlut_on()) return palette_color(v);
                 switch (t.fmt) {
                     case G::CI: return palette_color(v);
                     case G::IA: { uint32_t i = (v >> 4) * 17, a = (v & 0xF) * 17; return i | (i << 8) | (i << 16) | (a << 24); }
@@ -555,7 +562,7 @@ struct Renderer::Impl {
         if (!L.valid) return white_tex;
         uint32_t mp[14] = { (uint32_t)t.fmt, (uint32_t)t.siz, (uint32_t)t.line, (uint32_t)w, (uint32_t)h, (uint32_t)t.palette,
                             L.addr, (uint32_t)L.block, (uint32_t)L.width, (uint32_t)L.siz, (uint32_t)(L.uls << 16 | L.ult),
-                            (othermode_h >> G::TEXTLUT_SHIFT) & 3, t.fmt == G::CI ? tlut_serial : 0u, (uint32_t)(t.cms << 8 | t.cmt << 4 | (t.masks ? 1 : 0)) };
+                            (othermode_h >> G::TEXTLUT_SHIFT) & 3, tile_uses_tlut(t) ? tlut_serial : 0u, (uint32_t)(t.cms << 8 | t.cmt << 4 | (t.masks ? 1 : 0)) };
         uint64_t memo_key = XXH3_64bits(mp, sizeof(mp));
         if (auto m = tex_memo.find(memo_key); m != tex_memo.end()) return m->second.id;
         GLuint id = texture_for_tile_hashed(t, L, w, h);
@@ -567,7 +574,7 @@ struct Renderer::Impl {
         if (getenv("TNT_GLES_FBTEX")) {
             for (auto& f : framebuffers)
                 if (L.addr >= f.addr && L.addr < f.addr + (uint32_t)(f.width * f.height * 2))
-                    printf("[gfx] frame %llu: texture from colour image 0x%06X (+0x%X) fmt %d siz %d %dx%d\n", (unsigned long long)frame, f.addr, L.addr - f.addr, t.fmt, t.siz, w, h);
+                    printf("[gfx] frame %llu: texture from colour image 0x%06X (+0x%X) fmt %d siz %d %dx%d while drawing to 0x%06X uls %d ult %d block %d\n", (unsigned long long)frame, f.addr, L.addr - f.addr, t.fmt, t.siz, w, h, cimg_addr, L.uls, L.ult, (int)L.block);
         }
 
         // Hash the source rows (raw RDRAM) plus the parameters that change decoding.
@@ -585,7 +592,7 @@ struct Renderer::Impl {
             if (end > 0x800000 || start >= end) break;
             XXH3_64bits_update(&st, rdram + start, end - start);
         }
-        if (t.fmt == G::CI) XXH3_64bits_update(&st, tlut, sizeof(tlut));
+        if (tile_uses_tlut(t)) XXH3_64bits_update(&st, tlut, sizeof(tlut));
         uint64_t key = XXH3_64bits_digest(&st);
 
         auto it = textures.find(key);
@@ -823,7 +830,45 @@ struct Renderer::Impl {
     // Builds the draw state for the current RDP settings; flushes if it differs from the batch's.
     // State commands (geometry mode, other modes, combiner, scissor) don't flush by themselves:
     // everything they affect is in the DrawKey, so a batch only ends when the state really changes.
-    struct TexInfo { GLuint id = 0; int w = 1, h = 1; };
+    // su/ou, sv/ov map the tile's 0..1 coordinates into the texture: identity for decoded
+    // textures, a sub-rectangle (v flipped) for a colour image sampled straight from the GPU.
+    struct TexInfo { GLuint id = 0; int w = 1, h = 1; float su = 1, ou = 0, sv = 1, ov = 0; };
+
+    // A tile loaded from a colour image the GPU has drawn (No Mercy copies its previous frame
+    // back in as 64x24 tiles for its intro, transitions and glow effects): RDRAM doesn't hold
+    // those pixels (screen images stay on the GPU), so sample the image's own GL texture.
+    bool framebuffer_tile(int ti, TexInfo& out) {
+        const Tile& t = tiles[ti & 7];
+        const TmemLoad& L = loads[t.tmem & 511];
+        if (!L.valid || L.block || t.siz != G::B16 || t.fmt != G::RGBA) return false;
+        for (auto& f : framebuffers) {
+            if (!f.last_drawn || f.siz != G::B16) continue;
+            uint32_t size = (uint32_t)(f.width * f.height * 2);
+            if (L.addr < f.addr || L.addr >= f.addr + size) continue;
+            if (L.width != f.width) return false;
+            if (&f == current_fb) {
+                static int warned = 0;
+                if (warned++ < 5) printf("[gfx] frame %llu: texture from the colour image being drawn (0x%06X): using RDRAM\n", (unsigned long long)frame, f.addr);
+                return false;
+            }
+            int w, h;
+            tile_size(t, w, h);
+            uint32_t off = L.addr - f.addr;
+            float x0 = (float)((off % (f.width * 2)) / 2 + L.uls), y0 = (float)(off / (f.width * 2) + L.ult);
+            out.id = f.tex; out.w = w; out.h = h;
+            out.su = (float)w / f.width;  out.ou = x0 / f.width;
+            out.sv = -(float)h / f.height; out.ov = 1.0f - y0 / f.height;
+            stats.fb_textures++;
+            return true;
+        }
+        return false;
+    }
+    TexInfo lookup_tile(int ti) {
+        TexInfo r;
+        if (framebuffer_tile(ti, r)) return r;
+        r.id = texture_for_tile(ti, r.w, r.h);
+        return r;
+    }
     uint64_t state_serial = 1, prepared_serial = 0;
     TexInfo prepared_t0, prepared_t1;
     void prepare(bool rect, bool is_fill_or_copy, TexInfo& t0, TexInfo& t1) {
@@ -841,8 +886,8 @@ struct Renderer::Impl {
         bool want_t0 = (cyc == G::CYC_COPY) || (!is_fill_or_copy && (tex_on || rect) && combiner_uses_texel(0));
         bool want_t1 = !is_fill_or_copy && (tex_on || rect) && cyc == G::CYC_2 && combiner_uses_texel(1);
         int tile0 = rect ? rect_tile : tex_tile;
-        if (want_t0) { t0.id = texture_for_tile(tile0, t0.w, t0.h); }
-        if (want_t1) { t1.id = texture_for_tile((tile0 + 1) & 7, t1.w, t1.h); }
+        if (want_t0) t0 = lookup_tile(tile0);
+        if (want_t1) t1 = lookup_tile((tile0 + 1) & 7);
         bool linear = ((othermode_h >> G::TEXFILT_SHIFT) & 3) != 0 && cyc != G::CYC_COPY;
         k.tex0 = t0.id; k.tex1 = t1.id; k.linear0 = k.linear1 = linear;
 
@@ -1064,8 +1109,8 @@ struct Renderer::Impl {
             g.x = v.x; g.y = v.y; g.z = v.z; g.w = v.w;
             if (shade) { g.r = cv.r; g.g = cv.g; g.b = cv.b; g.a = cv.a; }
             else { g.r = g.g = g.b = g.a = 1.0f; }
-            if (t0.id) tile_uv(tex_tile, v.s, v.t, t0.w, t0.h, g.u0, g.v0);
-            if (t1.id) tile_uv(tex_tile + 1, v.s, v.t, t1.w, t1.h, g.u1, g.v1);
+            if (t0.id) { tile_uv(tex_tile, v.s, v.t, t0.w, t0.h, g.u0, g.v0); g.u0 = g.u0 * t0.su + t0.ou; g.v0 = g.v0 * t0.sv + t0.ov; }
+            if (t1.id) { tile_uv(tex_tile + 1, v.s, v.t, t1.w, t1.h, g.u1, g.v1); g.u1 = g.u1 * t1.su + t1.ou; g.v1 = g.v1 * t1.sv + t1.ov; }
             batch.push_back(g);
         }
         stats.triangles++;
@@ -1148,8 +1193,8 @@ struct Renderer::Impl {
         if (!cfg.dump_dir.empty()) capture_background(tile, t0.w, t0.h, t0.id);
         if (tracing) {
             const Tile& T = tiles[tile]; const TmemLoad& L = loads[T.tmem & 511];
-            printf("[texrect] cyc %u (%.1f,%.1f)-(%.1f,%.1f) tile %d fmt %d siz %d tmem %d addr %06X %s st %.1f %.1f d %.3f %.3f tex %u %dx%d comb %06X:%08X oml %08X blend %u\n",
-                cyc, ulx, uly, lrx, lry, tile, T.fmt, T.siz, T.tmem, L.addr, L.valid ? (L.block ? "block" : "tile") : "none", s, t, dsdx, dtdy, t0.id, t0.w, t0.h, combine_w0, combine_w1, othermode_l, batch_key.blend);
+            printf("[texrect] cyc %u (%.1f,%.1f)-(%.1f,%.1f) tile %d fmt %d siz %d tmem %d addr %06X %s st %.1f %.1f d %.3f %.3f tex %u %dx%d comb %06X:%08X oml %08X blend %u omh %06X prim %.2f %.2f %.2f %.2f env %.2f %.2f %.2f %.2f\n",
+                cyc, ulx, uly, lrx, lry, tile, T.fmt, T.siz, T.tmem, L.addr, L.valid ? (L.block ? "block" : "tile") : "none", s, t, dsdx, dtdy, t0.id, t0.w, t0.h, combine_w0, combine_w1, othermode_l, batch_key.blend, othermode_h, prim[0], prim[1], prim[2], prim[3], env[0], env[1], env[2], env[3]);
         }
         const Tile& tl = tiles[tile];
         float s0 = s - tl.uls / 4.0f, t0c = t - tl.ult / 4.0f;
@@ -1166,6 +1211,10 @@ struct Renderer::Impl {
         };
         set(uv, t0.w, t0.h);
         set(uvb, t1.w, t1.h);
+        for (int i = 0; i < 4; i++) {
+            uv[i * 2] = uv[i * 2] * t0.su + t0.ou;  uv[i * 2 + 1] = uv[i * 2 + 1] * t0.sv + t0.ov;
+            uvb[i * 2] = uvb[i * 2] * t1.su + t1.ou; uvb[i * 2 + 1] = uvb[i * 2 + 1] * t1.sv + t1.ov;
+        }
         const float white[4] = { 1, 1, 1, 1 };
         float z = (othermode_l & G::ZS_PRIM) ? prim_depth * 2.0f - 1.0f : -1.0f;
         rect_vertices(ulx, uly, lrx, lry, z, uv, uvb, white);
@@ -1451,7 +1500,7 @@ void Renderer::process_dl(uint32_t dl_addr) {
         }
     }
     if (!I.cfg.dump_dir.empty()) I.save_backgrounds();
-    if (I.tracing && I.stats.triangles) I.trace_done = true;
+    if (I.tracing) I.trace_done = true; // one display list per run
     I.tracing = false;
     I.leave_framebuffer();
     I.evict_textures();
