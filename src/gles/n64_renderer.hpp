@@ -39,6 +39,8 @@ namespace n64gfx {
         // After a frame's display lists: true if they drew to the display, which must then be swapped.
         bool end_frame();
         const Stats& last_stats() const;
+        // Draws an RGBA image (w x h, scaled up) over the screen at (x, y) pixels, after present().
+        void draw_overlay(const uint32_t* rgba, int w, int h, int x, int y, int scale, bool changed);
     private:
         struct Impl;
         std::unique_ptr<Impl> impl;

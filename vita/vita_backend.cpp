@@ -34,6 +34,7 @@
 #include <psp2/kernel/threadmgr.h>
 
 #include "nm_game.hpp"
+#include "nm_perf.hpp"
 #include "font5x7.h"
 #include "librecomp/rsp.hpp"
 #include <vitaGL.h>
@@ -142,6 +143,32 @@ namespace {
         return buf;
     }
 
+    // ---- Timing overlay (SELECT + TRIANGLE toggles it) ----
+    std::atomic<bool> overlay_on{ true };
+    std::mutex overlay_mutex;
+    std::vector<std::string> overlay_lines;
+    bool overlay_changed = true;
+    constexpr int OV_W = 400, OV_H = 64;
+    std::vector<uint32_t> overlay_px(OV_W * OV_H);
+
+    void overlay_render_text() {
+        std::fill(overlay_px.begin(), overlay_px.end(), 0xA0000000u); // translucent black
+        int y = 2;
+        for (const std::string& line : overlay_lines) {
+            int x = 2;
+            for (char ch : line) {
+                if (ch != ' ') {
+                    const uint8_t* g = tnt_font::glyph((char)std::toupper((unsigned char)ch));
+                    if (!g) g = tnt_font::glyph('?');
+                    for (int r = 0; r < 7; r++) for (int c = 0; c < 5; c++)
+                        if ((g[r] & (0x10 >> c)) && x + c < OV_W && y + r < OV_H) overlay_px[(y + r) * OV_W + x + c] = 0xFFFFFFFFu;
+                }
+                x += 6;
+            }
+            y += 9;
+        }
+    }
+
     // ---- Audio: game rate -> 48 kHz through a ring buffer and an output thread ----
     constexpr int OUT_RATE = 48000, GRAIN = 512;
     std::mutex audio_mutex;
@@ -244,6 +271,11 @@ namespace {
         map(SCE_CTRL_CROSS, N64_A); map(SCE_CTRL_SQUARE, N64_B); map(SCE_CTRL_CIRCLE, N64_CD); map(SCE_CTRL_TRIANGLE, N64_CU);
         map(SCE_CTRL_LTRIGGER, N64_L); map(SCE_CTRL_RTRIGGER, N64_R);
         map(SCE_CTRL_START, N64_START); map(SCE_CTRL_SELECT, N64_Z);
+        static bool combo_down = false;
+        bool combo = (pad.buttons & SCE_CTRL_SELECT) && (pad.buttons & SCE_CTRL_TRIANGLE);
+        if (combo && !combo_down) overlay_on = !overlay_on.load();
+        combo_down = combo;
+        if (combo) b &= ~(N64_Z | N64_CU);
         float lx = stick(pad.lx), ly = stick(pad.ly);
         if (ly < -0.6f) b |= N64_DU; if (ly > 0.6f) b |= N64_DD;
         if (lx < -0.6f) b |= N64_DL; if (lx > 0.6f) b |= N64_DR;
@@ -306,6 +338,7 @@ namespace {
             const n64gfx::Stats& st = renderer->last_stats();
             gfx_draws += st.draw_calls; gfx_uploads += st.texture_uploads; gfx_tris += st.triangles;
             gfx_dl_us += usec_since(t0);
+            nm::perf::add_gfx((int64_t)usec_since(t0) * 1000);
             if (renderer->end_frame()) {
                 auto t1 = std::chrono::steady_clock::now();
                 vglSwapBuffers(GL_FALSE);
@@ -323,6 +356,12 @@ namespace {
             presented_frames = frames; presented_origin = origin;
             auto t0 = std::chrono::steady_clock::now();
             if (!renderer->present(origin)) return;
+            if (overlay_on) {
+                std::lock_guard lock{ overlay_mutex };
+                if (overlay_changed) overlay_render_text();
+                renderer->draw_overlay(overlay_px.data(), OV_W, OV_H, 8, 8, 1, overlay_changed);
+                overlay_changed = false;
+            }
             vglSwapBuffers(GL_FALSE);
             gfx_swaps++;
             if (++presents <= 3) printf("[gfx] present %d\n", presents);
@@ -397,6 +436,37 @@ namespace {
             }
             last = now; last_dl = dl; last_vi = vi; last_audio = au;
             update_thread_stats(dt);
+            {
+                double game_cpu = 0, gfx_cpu = 0, sp_cpu = 0, other_cpu = 0;
+                {
+                    std::lock_guard lock{ threads_mutex };
+                    for (auto& t : thread_stats) {
+                        if (t.percent < 0) continue;
+                        if (t.name.rfind("N64 thread", 0) == 0) game_cpu += t.percent;
+                        else if (t.name == "Gfx Thread") gfx_cpu += t.percent;
+                        else if (t.name == "SP Task Thread") sp_cpu += t.percent;
+                        else other_cpu += t.percent;
+                    }
+                }
+                nm::perf::Window pw;
+                pw.game_fps = 0;
+                static nm::perf::Window last_pw;
+                if (nm::perf::update(pw)) last_pw = pw;
+                std::vector<std::string> lines = {
+                    fmt("GAME %.1f FPS  LOGIC %.1f MS/FRAME", last_pw.game_fps, last_pw.game_busy_ms),
+                    fmt("GFX %.1f MS X %.0f/S  AUDIO %.1f MS X %.0f/S", last_pw.gfx_ms, last_pw.gfx_lists, last_pw.audio_ms, last_pw.audio_tasks),
+                    fmt("CPU: GAME %.0f  GFX %.0f  AUDIO %.0f  OTHER %.0f", game_cpu, gfx_cpu, sp_cpu, other_cpu),
+                    fmt("VI %.0f  SOUND GAPS %llu", rates.vi, (unsigned long long)audio_underruns.load()),
+                };
+                {
+                    std::lock_guard lock{ overlay_mutex };
+                    overlay_lines = lines;
+                    overlay_changed = true;
+                }
+                static int perf_report = 0;
+                if ((perf_report++ % 5) == 0) printf("[perf] %s | cpu%% game %.0f gfx %.0f audio %.0f other %.0f\n",
+                    nm::perf::summary(last_pw).c_str(), game_cpu, gfx_cpu, sp_cpu, other_cpu);
+            }
             for (int i = 0; i < 256; i++) {
                 uint64_t b = n64_busy_us[i].load();
                 n64_busy_pct[i] = (b - n64_busy_last[i]) / (dt * 1e6) * 100.0;
@@ -487,7 +557,27 @@ namespace {
 }
 
 extern "C" void tnt_vita_thread_busy(int id, uint64_t usecs) { n64_busy_us[id & 0xFF] += usecs; }
-extern "C" void tnt_vita_register_thread(const char* name) { register_thread_uid(sceKernelGetThreadId(), name); }
+// Thread placement: the game's threads (only one runs at a time) on core 0, the renderer on core 1,
+// the audio microcode on core 2; the light timing threads get a higher priority so they're never
+// held up behind a busy thread.
+extern "C" void tnt_vita_register_thread(const char* name) {
+    register_thread_uid(sceKernelGetThreadId(), name);
+    std::string n = name;
+    int mask = 0;
+    if (n.rfind("N64 thread", 0) == 0) mask = SCE_KERNEL_CPU_MASK_USER_0;
+    else if (n == "Gfx Thread") mask = SCE_KERNEL_CPU_MASK_USER_1;
+    else if (n == "SP Task Thread") mask = SCE_KERNEL_CPU_MASK_USER_2;
+    if (mask) {
+        int r = sceKernelChangeThreadCpuAffinityMask(0, mask);
+        if (r < 0) printf("[vita] affinity for %s failed: 0x%08X\n", name, r);
+    }
+    if (n == "VI Thread" || n == "Timer Thread" || n == "Audio output") {
+        int r = sceKernelChangeThreadPriority(0, 0x10000100 - 16);
+        if (r < 0) printf("[vita] priority for %s failed: 0x%08X\n", name, r);
+    }
+    int cur = sceKernelGetThreadCpuAffinityMask(0);
+    printf("[vita] thread '%s' affinity 0x%X priority 0x%X\n", name, cur, sceKernelGetThreadCurrentPriority());
+}
 
 std::filesystem::path nm::data_folder() { return std::filesystem::path{ NM_VITA_APP_DIR } / "nm_data"; }
 
@@ -519,6 +609,7 @@ void nm_platform_early_init(int, char**) {
     sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
     if (!init_display()) printf("[vita] couldn't allocate the framebuffer\n");
     tnt_vita_register_thread("Main / status screen");
+    nm::perf::install();
 }
 
 std::string nm_platform_find_rom(int, char**) {
@@ -537,6 +628,7 @@ nm::Backend nm::make_backend(int, char**) {
     const nm::Settings& st = nm::settings();
     headroom_vis = st.audio_latency;
     volume_percent = st.volume;
+    overlay_on = st.perf_overlay;
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
     audio_running = true;
     audio_thread = std::thread{ audio_thread_func };

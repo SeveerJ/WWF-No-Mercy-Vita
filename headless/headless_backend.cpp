@@ -31,6 +31,7 @@
 #include "gles/gles_includes.h"
 #include "gles/n64_renderer.hpp"
 #include "nm_game.hpp"
+#include "nm_perf.hpp"
 
 namespace {
     constexpr int OUT_W = 960, OUT_H = 544;
@@ -80,8 +81,9 @@ namespace {
     }
     void set_rumble(int, bool) {}
     ultramodern::input::connected_device_info_t get_connected_device_info(int n) {
-        return { .connected_device = ultramodern::input::Device::Controller,
-                 .connected_pak = n == 0 ? ultramodern::input::Pak::RumblePak : ultramodern::input::Pak::None };
+        // Same as the Vita: one controller, with the emulated Rumble Pak.
+        if (n != 0) return { .connected_device = ultramodern::input::Device::None, .connected_pak = ultramodern::input::Pak::None };
+        return { .connected_device = ultramodern::input::Device::Controller, .connected_pak = ultramodern::input::Pak::RumblePak };
     }
 
     // ---- Audio: a virtual device draining in real time ----
@@ -182,6 +184,7 @@ namespace {
             }
             renderer->process_dl(dl);
             gfx_us += usec(t0);
+            nm::perf::add_gfx((int64_t)usec(t0) * 1000);
             if (renderer->end_frame()) after_present();
         }
         void send_dummy_workload(uint32_t) override {}
@@ -237,7 +240,9 @@ namespace {
         static uint64_t l_dl = 0, l_vi = 0, l_au = 0, l_gfx = 0, l_rsp = 0, l_tasks = 0;
         auto now = std::chrono::steady_clock::now();
         double dt = std::chrono::duration<double>(now - last).count();
-        if (dt >= 2.0) {
+        nm::perf::Window pw;
+        if (nm::perf::update(pw)) printf("[perf] t=%.0fs %s\n", std::chrono::duration<double>(now - t_start).count(), nm::perf::summary(pw).c_str());
+        if (dt >= 2.0 && getenv("NM_STATS")) {
             uint64_t d = dl_count, v = vi_count, a = audio_frames, g = gfx_us, r = rsp_us, t = rsp_tasks;
             printf("[stat] t=%.0fs fps=%.1f vi=%.1f audio=%.0f/s gfx=%.2fms/frame rsp=%.2fms/task (%.0f%%) polls=%llu\n",
                 std::chrono::duration<double>(now - t_start).count(), (d - l_dl) / dt, (v - l_vi) / dt, (a - l_au) / dt,
@@ -274,6 +279,7 @@ void nm::set_error(const std::string& msg) { printf("[headless] ERROR: %s\n", ms
 void nm_platform_early_init(int, char**) {
     signal(SIGSEGV, crash_handler); signal(SIGABRT, crash_handler); signal(SIGBUS, crash_handler); signal(SIGILL, crash_handler);
     t_start = std::chrono::steady_clock::now();
+    nm::perf::install();
     if (const char* s = getenv("NM_SECONDS")) run_seconds = atof(s);
     if (const char* s = getenv("NM_DUMP")) dump_prefix = s;
     if (const char* s = getenv("NM_DUMP_EVERY")) dump_every = std::max(1, atoi(s));

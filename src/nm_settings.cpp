@@ -20,8 +20,8 @@ namespace {
         "[display]\n"
         "; native = the N64's own 320x240, 2x = twice that (sharper, slower)\n"
         "resolution = native\n"
-        "; frame rate and timings in the corner (SELECT + TRIANGLE toggles it)\n"
-        "show_fps = false\n"
+        "; timings in the corner (SELECT + TRIANGLE toggles it)\n"
+        "perf_overlay = true\n"
         "; 0 = draw every frame, 1 = draw every other frame (faster, choppier)\n"
         "frameskip = 0\n"
         "\n"
@@ -55,6 +55,7 @@ void nm::init_settings() {
         std::string k = trim(line.substr(0, eq)), v = trim(line.substr(eq + 1));
         if (k == "resolution") g_settings.resolution = v;
         else if (k == "show_fps") g_settings.show_fps = to_bool(v);
+        else if (k == "perf_overlay") g_settings.perf_overlay = to_bool(v);
         else if (k == "frameskip") g_settings.frameskip = std::atoi(v.c_str()) < 0 ? 0 : std::atoi(v.c_str()) > 3 ? 3 : std::atoi(v.c_str());
         else if (k == "volume") g_settings.volume = std::atoi(v.c_str()) < 0 ? 0 : std::atoi(v.c_str()) > 100 ? 100 : std::atoi(v.c_str());
         else if (k == "audio_latency") g_settings.audio_latency = std::atoi(v.c_str()) < 0 ? 0 : std::atoi(v.c_str()) > 8 ? 8 : std::atoi(v.c_str());

@@ -50,6 +50,7 @@ set(NM_APP_SOURCES
     src/nm_main.cpp
     src/nm_settings.cpp
     src/nm_stubs.cpp
+    src/nm_perf.cpp
     src/gles/n64_renderer.cpp
     "${NM_GAME_DIR}/src/main/register_overlays.cpp"
     "${NM_GAME_DIR}/rsp/nomercy_audio.cpp")

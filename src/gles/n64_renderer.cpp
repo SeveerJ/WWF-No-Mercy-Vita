@@ -179,6 +179,11 @@ struct Renderer::Impl {
     Tile tiles[8];
     TmemLoad loads[512];
     uint16_t tlut[256] = {};
+    uint32_t tlut_serial = 0;   // bumped on every G_LOADTLUT
+    // Textures already looked up in this display list, keyed by everything that decides their
+    // contents except the RDRAM bytes: hashing the source texels is done once per list, not per draw.
+    struct MemoEntry { GLuint id; int w, h; };
+    std::unordered_map<uint64_t, MemoEntry> tex_memo;
 
     // GL objects
     std::unordered_map<uint64_t, ShaderProgram> programs;
@@ -193,6 +198,17 @@ struct Renderer::Impl {
     bool target_display = false, display_drawn = false;
     int tgt_x0 = 0, tgt_y0 = 0; float tgt_sx = 1, tgt_sy = 1;
     ShaderProgram present_prog;
+    GLuint overlay_prog_id = 0;
+    GLuint overlay_prog() {
+        if (!overlay_prog_id) {
+            overlay_prog_id = link_program(kVertexShader,
+                "precision mediump float;\nuniform sampler2D uTex0;\nvarying vec4 vColor;\nvarying vec2 vUV0;\nvarying vec2 vUV1;\n"
+                "void main() { gl_FragColor = texture2D(uTex0, vUV0); }\n");
+            glUseProgram(overlay_prog_id);
+            glUniform1i(glGetUniformLocation(overlay_prog_id, "uTex0"), 0);
+        }
+        return overlay_prog_id;
+    }
     std::vector<GLVertex> batch;
     std::vector<uint32_t> decode_buf;
 
@@ -389,6 +405,7 @@ struct Renderer::Impl {
 
     void bind_color_image() {
         leave_framebuffer();
+        tex_memo.clear(); // a new target may be sampled as a texture later in this list
         if (cimg_addr == zimg_addr) return; // depth image: handled by fills
         Framebuffer* f = get_framebuffer(cimg_addr, cimg_width);
         current_fb = f;
@@ -521,6 +538,16 @@ struct Renderer::Impl {
         tile_size(t, w, h);
         w_out = w; h_out = h;
         if (!L.valid) return white_tex;
+        uint32_t mp[14] = { (uint32_t)t.fmt, (uint32_t)t.siz, (uint32_t)t.line, (uint32_t)w, (uint32_t)h, (uint32_t)t.palette,
+                            L.addr, (uint32_t)L.block, (uint32_t)L.width, (uint32_t)L.siz, (uint32_t)(L.uls << 16 | L.ult),
+                            (othermode_h >> G::TEXTLUT_SHIFT) & 3, t.fmt == G::CI ? tlut_serial : 0u, (uint32_t)(t.cms << 8 | t.cmt << 4 | (t.masks ? 1 : 0)) };
+        uint64_t memo_key = XXH3_64bits(mp, sizeof(mp));
+        if (auto m = tex_memo.find(memo_key); m != tex_memo.end()) return m->second.id;
+        GLuint id = texture_for_tile_hashed(t, L, w, h);
+        tex_memo[memo_key] = { id, w, h };
+        return id;
+    }
+    GLuint texture_for_tile_hashed(const Tile& t, const TmemLoad& L, int w, int h) {
         sync_rdram_for(L.addr);
         if (getenv("TNT_GLES_FBTEX")) {
             for (auto& f : framebuffers)
@@ -1294,6 +1321,7 @@ struct Renderer::Impl {
                     uint32_t src = timg_addr + ((w0 >> 14) & 0x3FF) * 2;
                     for (int i = 0; i < count && start + i < 256; i++)
                         if (start + i >= 0) tlut[start + i] = r16(src + i * 2);
+                    tlut_serial++;
                     break;
                 }
                 case 0xF2: {                                                // G_SETTILESIZE
@@ -1378,6 +1406,7 @@ void Renderer::process_dl(uint32_t dl_addr) {
     Impl& I = *impl;
     I.stats = {};
     I.frame++;
+    I.tex_memo.clear();
     memset(I.segments, 0, sizeof(I.segments));
     static const long trace_from = getenv("TNT_GLES_TRACE_FRAME") ? atol(getenv("TNT_GLES_TRACE_FRAME")) : -1;
     I.tracing = trace_from >= 0 && (long)I.frame >= trace_from && !I.trace_done;
@@ -1450,5 +1479,38 @@ bool Renderer::end_frame() {
 }
 
 const Stats& Renderer::last_stats() const { return impl->last; }
+
+void Renderer::draw_overlay(const uint32_t* rgba, int w, int h, int x, int y, int scale, bool changed) {
+    Impl& I = *impl;
+    static GLuint tex = 0;
+    if (!tex) {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        changed = true;
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    if (changed) glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    int ow = I.cfg.output_width, oh = I.cfg.output_height;
+    glViewport(0, 0, ow, oh);
+    glUseProgram(I.overlay_prog());
+    float x0 = 2.0f * x / ow - 1, x1 = 2.0f * (x + w * scale) / ow - 1;
+    float y0 = 1 - 2.0f * y / oh, y1 = 1 - 2.0f * (y + h * scale) / oh;
+    const GLVertex quad[6] = {
+        { x0, y0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0 }, { x1, y0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0 }, { x0, y1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 0 },
+        { x1, y0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0 }, { x1, y1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0 }, { x0, y1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 0 },
+    };
+    I.draw_quad(quad);
+    I.forget_gl_state();
+    I.current_fb = nullptr;
+}
 
 } // namespace n64gfx
