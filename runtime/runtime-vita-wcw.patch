@@ -318,10 +318,33 @@ index 0751323..6a90399 100644
                  fprintf(stderr, "[saves] restore of %s failed: %s\n", entry->backup_file.filename().string().c_str(), ec.message().c_str());
                  return {};
 diff --git a/librecomp/src/si.cpp b/librecomp/src/si.cpp
-index a7fb08b..3b0fd6a 100644
+index a7fb08b..b9b9b01 100644
 --- a/librecomp/src/si.cpp
 +++ b/librecomp/src/si.cpp
-@@ -333,7 +333,8 @@ static void wcw_process_pif() {
+@@ -234,7 +234,21 @@ static void wcw_process_pif() {
+     // and the controller list). The normal poller is osContStartReadData, which this game
+     // never calls (raw-SI path) — without this poll the cache stays empty forever and all
+     // input reads as neutral.
+-    ultramodern::input::poll_input();
++    // [nm vita] Only a block that reads a controller (joybus 0x01) takes a new sample: the
++    // backend reports presses made since the previous sample, so pak probes in between
++    // mustn't use them up.
++    bool reads_pad = false;
++    for (int j = 0, ch = 0; j < 63 && ch < MAXCONTROLLERS;) {
++        uint8_t t = pif_ram[j];
++        if (t == 0xFE) break;
++        if (t == 0x00) { ch++; j++; continue; }
++        if (t == 0xFF || (t & 0xC0)) { j++; continue; }
++        uint8_t rx = pif_ram[j + 1] & 0x3F;
++        if (j + 2 + t + rx > 64) break;
++        if (pif_ram[j + 2] == 0x01) { reads_pad = true; break; }
++        j += 2 + t + rx; ch++;
++    }
++    if (reads_pad) ultramodern::input::poll_input();
+     // osContGetReadData reads current host input (already converted to N64 stick range) and
+     // sets err_no != 0 for absent controllers.
+     osContGetReadData(pads);
+@@ -333,7 +347,8 @@ static void wcw_process_pif() {
                  if (want_rumble != wcw_pak_is_rumble) {
                      wcw_pak_is_rumble = want_rumble;
                      if (!want_rumble) ultramodern::input::set_rumble(0, false);

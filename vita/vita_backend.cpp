@@ -258,6 +258,10 @@ namespace {
     // right stick = N64 analog stick (taunts), rear touch pad left/right half = C-Left/C-Right.
     std::mutex input_mutex;
     uint16_t cur_buttons = 0;
+    // Buttons pressed since the game last read the controller. The game reads it once per frame,
+    // so when the frame rate drops a quick tap could start and end between two reads and be
+    // lost; every press is held until the next read instead.
+    uint16_t pressed_since_poll = 0, polled_buttons = 0;
     float cur_x = 0, cur_y = 0;
     uint64_t quit_held_since = 0;
 
@@ -289,6 +293,7 @@ namespace {
         {
             std::lock_guard lock{ input_mutex };
             cur_buttons = b;
+            pressed_since_poll |= b;
             cur_x = stick(pad.rx);
             cur_y = -stick(pad.ry);
         }
@@ -305,11 +310,15 @@ namespace {
             }
         } else quit_held_since = 0;
     }
-    void poll_input() {}
+    void poll_input() {
+        std::lock_guard lock{ input_mutex };
+        polled_buttons = cur_buttons | pressed_since_poll;
+        pressed_since_poll = 0;
+    }
     bool get_input(int n, uint16_t* buttons, float* x, float* y) {
         if (n != 0) { *buttons = 0; *x = 0; *y = 0; return false; }
         std::lock_guard lock{ input_mutex };
-        *buttons = cur_buttons; *x = cur_x; *y = cur_y;
+        *buttons = polled_buttons; *x = cur_x; *y = cur_y;
         return true;
     }
     void set_rumble(int, bool) {}
