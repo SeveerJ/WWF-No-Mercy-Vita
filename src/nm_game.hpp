@@ -32,7 +32,8 @@ namespace nm {
         bool perf_overlay = true;           // timings in the corner (SELECT + TRIANGLE)
         int volume = 100;                   // percent
         int audio_latency = 2;              // VIs of extra audio kept queued
-        int frameskip = 0;                  // draw 1 of every (frameskip+1) frames; 0 = draw all
+        int frameskip = 0;
+        std::string audio_microcode = "auto"; // auto (hle on the Vita), hle, recompiled                  // draw 1 of every (frameskip+1) frames; 0 = draw all
     };
     Settings& settings();
     void init_settings();

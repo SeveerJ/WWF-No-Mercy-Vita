@@ -47,6 +47,7 @@ extern "C" unsigned int _newlib_heap_size_user = 200 * 1024 * 1024;
 
 extern "C" void tnt_vita_register_thread(const char* name);
 
+void nm_set_rdram(uint8_t* rdram); // nm_main.cpp
 namespace {
     uint64_t now_ms() {
         return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -406,6 +407,7 @@ namespace {
         uint32_t presented_origin = 0;
     };
     std::unique_ptr<ultramodern::renderer::RendererContext> create_render_context(uint8_t* rdram, ultramodern::renderer::WindowHandle, bool) {
+        nm_set_rdram(rdram);
         return std::make_unique<VitaGLRenderer>(rdram);
     }
 

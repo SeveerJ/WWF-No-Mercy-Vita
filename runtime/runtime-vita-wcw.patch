@@ -272,6 +272,20 @@ index aad9c57..0350019 100644
  #else
      // munmap returns -1 on failure.
      free_failed = (munmap(rdram, allocation_size) == -1);
+diff --git a/librecomp/src/si.cpp b/librecomp/src/si.cpp
+index a7fb08b..3b0fd6a 100644
+--- a/librecomp/src/si.cpp
++++ b/librecomp/src/si.cpp
+@@ -333,7 +333,8 @@ static void wcw_process_pif() {
+                 if (want_rumble != wcw_pak_is_rumble) {
+                     wcw_pak_is_rumble = want_rumble;
+                     if (!want_rumble) ultramodern::input::set_rumble(0, false);
+-                    fprintf(stderr, "[wcw][pak] identity -> %s (bank write addr=0x%04X data=0x%02X)\n",
++                    static int identity_logs = 0; // the game re-probes every few frames in a match: log the first few only
++                    if (identity_logs++ < 20) fprintf(stderr, "[wcw][pak] identity -> %s (bank write addr=0x%04X data=0x%02X)\n",
+                             want_rumble ? "RUMBLE PAK" : "CONTROLLER PAK", addr, data[0]);
+                 }
+                 wcw_log_pak_bank_op('W', addr, data[0]);
 diff --git a/thirdparty/concurrentqueue/lightweightsemaphore.h b/thirdparty/concurrentqueue/lightweightsemaphore.h
 index 41ba094..1dff57a 100644
 --- a/thirdparty/concurrentqueue/lightweightsemaphore.h

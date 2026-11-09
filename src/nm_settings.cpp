@@ -29,7 +29,9 @@ namespace {
         "; 0-100\n"
         "volume = 100\n"
         "; extra frames of sound kept queued: raise if the sound crackles\n"
-        "audio_latency = 2\n";
+        "audio_latency = 2\n"
+        "; auto, hle (fast) or recompiled (exact, slow on the Vita)\n"
+        "audio_microcode = auto\n";
 
     std::filesystem::path settings_path() {
         return nm::data_folder().parent_path() / "settings.ini";
@@ -57,9 +59,10 @@ void nm::init_settings() {
         else if (k == "show_fps") g_settings.show_fps = to_bool(v);
         else if (k == "perf_overlay") g_settings.perf_overlay = to_bool(v);
         else if (k == "frameskip") g_settings.frameskip = std::atoi(v.c_str()) < 0 ? 0 : std::atoi(v.c_str()) > 3 ? 3 : std::atoi(v.c_str());
+        else if (k == "audio_microcode") g_settings.audio_microcode = v;
         else if (k == "volume") g_settings.volume = std::atoi(v.c_str()) < 0 ? 0 : std::atoi(v.c_str()) > 100 ? 100 : std::atoi(v.c_str());
         else if (k == "audio_latency") g_settings.audio_latency = std::atoi(v.c_str()) < 0 ? 0 : std::atoi(v.c_str()) > 8 ? 8 : std::atoi(v.c_str());
     }
-    printf("[settings] resolution=%s show_fps=%d frameskip=%d volume=%d audio_latency=%d\n",
-        g_settings.resolution.c_str(), (int)g_settings.show_fps, g_settings.frameskip, g_settings.volume, g_settings.audio_latency);
+    printf("[settings] resolution=%s frameskip=%d volume=%d audio_latency=%d audio_microcode=%s\n",
+        g_settings.resolution.c_str(), g_settings.frameskip, g_settings.volume, g_settings.audio_latency, g_settings.audio_microcode.c_str());
 }

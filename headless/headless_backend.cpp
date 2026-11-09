@@ -33,6 +33,8 @@
 #include "nm_game.hpp"
 #include "nm_perf.hpp"
 
+void nm_set_rdram(uint8_t* rdram); // nm_main.cpp
+extern uint8_t* nm_audio_shadow; extern uint8_t* nm_audio_shadow_base; // NM_AUDIO_COMPARE
 namespace {
     constexpr int OUT_W = 960, OUT_H = 544;
     std::atomic<uint64_t> dl_count{ 0 }, vi_count{ 0 }, presents{ 0 }, polls{ 0 }, audio_frames{ 0 };
@@ -90,7 +92,7 @@ namespace {
     std::mutex audio_mutex;
     double queued = 0;
     std::chrono::steady_clock::time_point last_drain = std::chrono::steady_clock::now();
-    FILE* wav = nullptr;
+    FILE* wav = nullptr; FILE* wav2 = nullptr;
     uint64_t wav_frames = 0;
     void drain() {
         auto now = std::chrono::steady_clock::now();
@@ -107,6 +109,10 @@ namespace {
             for (size_t i = 0; i + 1 < count; i += 2) { int16_t lr[2] = { data[i + 1], data[i] }; fwrite(lr, 2, 2, wav); }
             wav_frames += count / 2;
         }
+        if (wav2 && nm_audio_shadow) {
+            const int16_t* sd = reinterpret_cast<const int16_t*>(nm_audio_shadow + ((uint8_t*)data - nm_audio_shadow_base));
+            for (size_t i = 0; i + 1 < count; i += 2) { int16_t lr[2] = { sd[i + 1], sd[i] }; fwrite(lr, 2, 2, wav2); }
+        }
     }
     size_t get_frames_remaining() { std::lock_guard lock{ audio_mutex }; drain(); return (size_t)queued; }
     void set_frequency(uint32_t f) { printf("[headless] audio rate %u Hz\n", f); audio_rate = f; }
@@ -119,6 +125,7 @@ namespace {
         fwrite("RIFF", 1, 4, wav); w32(36 + bytes); fwrite("WAVEfmt ", 1, 8, wav);
         w32(16); w16(1); w16(2); w32(rate); w32(rate * 4); w16(4); w16(16); fwrite("data", 1, 4, wav); w32(bytes);
         fclose(wav); wav = nullptr;
+        if (wav2) fclose(wav2);
     }
 
     // ---- EGL ----
@@ -230,6 +237,7 @@ namespace {
     };
 
     std::unique_ptr<ultramodern::renderer::RendererContext> create_render_context(uint8_t* rdram, ultramodern::renderer::WindowHandle, bool) {
+        nm_set_rdram(rdram);
         return std::make_unique<GlesContext>(rdram);
     }
     void* create_gfx() { return nullptr; }
@@ -285,6 +293,7 @@ void nm_platform_early_init(int, char**) {
     if (const char* s = getenv("NM_DUMP_EVERY")) dump_every = std::max(1, atoi(s));
     if (const char* s = getenv("NM_INPUT")) load_script(s);
     if (const char* s = getenv("NM_WAV")) { wav = fopen(s, "wb"); if (wav) fseek(wav, 44, SEEK_SET); }
+    if (const char* s = getenv("NM_WAV2")) { wav2 = fopen(s, "wb"); } // raw 16-bit stereo, recompiled ucode (NM_AUDIO_COMPARE)
 }
 
 std::string nm_platform_find_rom(int argc, char** argv) {

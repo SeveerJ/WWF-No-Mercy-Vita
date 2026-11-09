@@ -51,6 +51,11 @@ set(NM_APP_SOURCES
     src/nm_settings.cpp
     src/nm_stubs.cpp
     src/nm_perf.cpp
+    src/nm_hle_audio.cpp
+    src/hle_audio/alist.c
+    src/hle_audio/alist_naudio.c
+    src/hle_audio/audio.c
+    src/hle_audio/memory.c
     src/gles/n64_renderer.cpp
     "${NM_GAME_DIR}/src/main/register_overlays.cpp"
     "${NM_GAME_DIR}/rsp/nomercy_audio.cpp")
