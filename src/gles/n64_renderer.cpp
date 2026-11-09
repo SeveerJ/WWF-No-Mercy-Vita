@@ -101,6 +101,9 @@ struct Vertex {          // after transform
     float x, y, z, w;    // GL clip space (viewport already applied)
     float r, g, b, a;
     float s, t;          // texture coords in texels * 32 (S10.5 units), after G_TEXTURE scale
+    uint32_t src = 0;    // diagnostics: RDRAM address it was loaded from
+    uint8_t modified = 0; // diagnostics: MODIFYVTX bits applied (1 st, 2 xy, 4 z, 8 colour)
+    uint32_t mtx = 0;    // diagnostics: serial of the matrix it was transformed with
 };
 
 struct GLVertex { float x, y, z, w, r, g, b, a, u0, v0, u1, v1; };
@@ -259,6 +262,10 @@ struct Renderer::Impl {
     // ---- memory ----
     uint32_t phys(uint32_t addr) const {
         uint32_t seg = (addr >> 24) & 0xF;
+        if (seg && !segments[seg] && getenv("NM_GLES_SEGWARN")) {
+            static int n = 0;
+            if (n++ < 20) printf("[gfx] frame %llu: segment %u used before it was set (addr %08X)\n", (unsigned long long)frame, seg, addr);
+        }
         return (segments[seg] + (addr & 0xFFFFFF)) & 0x7FFFFF;
     }
     uint32_t r32(uint32_t a) const { return *reinterpret_cast<const uint32_t*>(rdram + (a & 0x7FFFFC)); }
@@ -870,6 +877,7 @@ struct Renderer::Impl {
         return r;
     }
     uint64_t state_serial = 1, prepared_serial = 0;
+    uint32_t mtx_serial = 0;
     TexInfo prepared_t0, prepared_t1;
     void prepare(bool rect, bool is_fill_or_copy, TexInfo& t0, TexInfo& t1) {
         // Nothing but vertices and triangles since the last call: same state.
@@ -996,12 +1004,14 @@ struct Renderer::Impl {
     }
     int ucode_logs = 0;
     bool op_stats = getenv("NM_GLES_OPSTATS") != nullptr;
-    uint32_t op_counts[256] = {}, mm_counts[256] = {}, mw_counts[256] = {}, mv_where[256] = {};
+    uint32_t op_counts[256] = {}, mm_counts[256] = {}, mw_counts[256] = {}, mv_where[256] = {}, mm14_shape[1024] = {};
     void print_op_stats() {
         printf("[ops] frame %llu:", (unsigned long long)frame);
         for (int i = 0; i < 256; i++) if (op_counts[i]) printf(" %02X:%u", i, op_counts[i]);
         printf(" | movemem"); for (int i = 0; i < 256; i++) if (mm_counts[i]) printf(" %d:%u", i, mm_counts[i]);
         printf(" | moveword"); for (int i = 0; i < 256; i++) if (mw_counts[i]) printf(" %d:%u", i, mw_counts[i]);
+        printf(" | mm14(len8-1,ofs8)"); for (int i = 0; i < 1024; i++) if (mm14_shape[i]) printf(" %d,%d:%u", i / 32, i % 32, mm14_shape[i]);
+        memset(mm14_shape, 0, sizeof(mm14_shape));
         printf(" | modifyvtx"); for (int i = 0; i < 256; i++) if (mv_where[i]) printf(" %02X:%u", i, mv_where[i]);
         printf("\n");
         memset(mv_where, 0, sizeof(mv_where));
@@ -1034,6 +1044,9 @@ struct Renderer::Impl {
     void load_vertices(uint32_t addr, int first, int count) {
         ProfScope ps(0);
         update_mvp();
+        // Bind the colour image before using its size: a list's first vertices can arrive before
+        // its first triangle, and the 320-wide fallback misplaced them (the "detached foot").
+        ensure_target();
         const float (&mv)[4][4] = mv_stack[mv_depth];
         float W = fb_w(), H = fb_h();
         for (int i = 0; i < count && first + i < 64; i++) {
@@ -1043,6 +1056,7 @@ struct Renderer::Impl {
             uint8_t c0 = r8(a + 12), c1 = r8(a + 13), c2 = r8(a + 14), c3 = r8(a + 15);
             if (tracing) printf("[vtx] %06X #%d: %6.0f %6.0f %6.0f  st %6.0f %6.0f  c %02X %02X %02X %02X\n", a, first + i, x, y, z, s, t, c0, c1, c2, c3);
             Vertex& v = verts[first + i];
+            v.src = a; v.modified = 0; v.mtx = mtx_serial;
             float cx = x * mvp[0][0] + y * mvp[1][0] + z * mvp[2][0] + mvp[3][0];
             float cy = x * mvp[0][1] + y * mvp[1][1] + z * mvp[2][1] + mvp[3][1];
             float cz = x * mvp[0][2] + y * mvp[1][2] + z * mvp[2][2] + mvp[3][2];
@@ -1092,6 +1106,24 @@ struct Renderer::Impl {
 
     void triangle(int i0, int i1, int i2) {
         if (i0 > 63 || i1 > 63 || i2 > 63) return;
+        if (tracing) {
+            static const char* box = getenv("NM_GLES_TRIBOX"); // "x0,y0,x1,y1" in colour-image pixels
+            static int bx0 = -1, by0, bx1, by1;
+            if (box && bx0 < 0) sscanf(box, "%d,%d,%d,%d", &bx0, &by0, &bx1, &by1);
+            if (box) {
+                float sx = 0, sy = 0;
+                for (int k : { i0, i1, i2 }) { const Vertex& q = verts[k]; float iw = q.w != 0 ? 1.0f / q.w : 0; sx += (q.x * iw + 1) * fb_w() / 6; sy += (1 - q.y * iw) * fb_h() / 6; }
+                if (sx >= bx0 && sx <= bx1 && sy >= by0 && sy <= by1)
+                    printf("[tribox] (%.0f,%.0f) v %d %d %d src %06X %06X %06X mtx %u %u %u mod %d %d %d w %.2f %.2f %.2f\n", sx, sy, i0, i1, i2,
+                        verts[i0].src, verts[i1].src, verts[i2].src, verts[i0].mtx, verts[i1].mtx, verts[i2].mtx,
+                        verts[i0].modified, verts[i1].modified, verts[i2].modified, verts[i0].w, verts[i1].w, verts[i2].w);
+                if (box && sx >= bx0 && sx <= bx1 && sy >= by0 && sy <= by1) {
+                    printf("[tripts] %u", (unsigned)frame);
+                    for (int k : { i0, i1, i2 }) { const Vertex& q = verts[k]; float iw = q.w != 0 ? 1.0f / q.w : 0; printf(" %.1f %.1f", (q.x * iw + 1) * fb_w() / 2, (1 - q.y * iw) * fb_h() / 2); }
+                    printf(" %u %06X fb%dx%d\n", verts[i0].mtx, verts[i0].src, fb_w(), fb_h());
+                }
+            }
+        }
         if (!ensure_target()) return;
         TexInfo t0, t1;
         prepare(false, false, t0, t1);
@@ -1229,7 +1261,7 @@ struct Renderer::Impl {
             uint32_t w0 = r32(pc), w1 = r32(pc + 4);
             pc += 8;
             uint8_t op = w0 >> 24;
-            if (op_stats) { op_counts[op]++; if (op == 0xDC) mm_counts[w0 & 0xFF]++; if (op == 0xDB) mw_counts[(w0 >> 16) & 0xFF]++; if (op == 0x02) mv_where[(w0 >> 16) & 0xFF]++; }
+            if (op_stats) { op_counts[op]++; if (op == 0xDC) { mm_counts[w0 & 0xFF]++; if ((w0 & 0xFF) == 14) mm14_shape[((w0 >> 19) & 0x1F) * 32 + ((w0 >> 8) & 0x1F)]++; } if (op == 0xDB) mw_counts[(w0 >> 16) & 0xFF]++; if (op == 0x02) mv_where[(w0 >> 16) & 0xFF]++; }
             if (op >= 0xD0 || op == 0x04) state_serial++;
             if (tracing && trace_cmds) printf("[cmd] %06X: %08X %08X\n", pc - 8, w0, w1);
             switch (op) {
@@ -1243,10 +1275,12 @@ struct Renderer::Impl {
                     int where = (w0 >> 16) & 0xFF, idx = ((w0 & 0xFFFF) >> 1);
                     if (idx < 64) {
                         Vertex& v = verts[idx];
+                        v.modified |= where == 0x14 ? 1 : where == 0x18 ? 2 : where == 0x1C ? 4 : where == 0x10 ? 8 : 0;
                         if (where == 0x10) { v.r = (w1 >> 24) / 255.0f; v.g = ((w1 >> 16) & 0xFF) / 255.0f; v.b = ((w1 >> 8) & 0xFF) / 255.0f; v.a = (w1 & 0xFF) / 255.0f; }
                         else if (where == 0x14) { v.s = (int16_t)(w1 >> 16); v.t = (int16_t)(w1 & 0xFFFF); } // already scaled
                         else if (where == 0x18) {
                             // Screen position (10.2 pixels): The New Tetris places its pieces this way.
+                            ensure_target();
                             float sx = (int16_t)(w1 >> 16) / 4.0f, sy = (int16_t)(w1 & 0xFFFF) / 4.0f;
                             float z = v.w > 0 ? clampf(v.z / v.w, -1.0f, 1.0f) : 0.0f;
                             v.x = sx / (fb_w() * 0.5f) - 1.0f;
@@ -1328,6 +1362,9 @@ struct Renderer::Impl {
                     }
                     if (index == 14) { // G_MV_MATRIX (gSPForceMatrix): the combined MVP, used as is until the next G_MTX
                         load_matrix(a, mvp);
+                        mtx_serial++;
+                        if (tracing) printf("[mtx] #%u from %06X: row3 %.1f %.1f %.1f %.1f | diag %.3f %.3f %.3f %.3f\n", mtx_serial, a, mvp[3][0], mvp[3][1], mvp[3][2], mvp[3][3], mvp[0][0], mvp[1][1], mvp[2][2], mvp[2][3]);
+                        if (tracing) { printf("[mtxfull] %u", mtx_serial); for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) printf(" %.6g", mvp[r][c]); printf("\n"); }
                         mvp_dirty = false;
                         state_serial++;
                     } else if (index == 8) { // viewport
@@ -1484,6 +1521,8 @@ void Renderer::process_dl(uint32_t dl_addr) {
     I.frame++;
     memset(I.segments, 0, sizeof(I.segments));
     static const long trace_from = getenv("TNT_GLES_TRACE_FRAME") ? atol(getenv("TNT_GLES_TRACE_FRAME")) : -1;
+    static const bool listmark = getenv("NM_GLES_LISTMARK") != nullptr;
+    if (listmark && (I.frame % 100) == 0) printf("[listmark] %u\n", (unsigned)I.frame);
     I.tracing = trace_from >= 0 && (long)I.frame >= trace_from && !I.trace_done;
     I.run(dl_addr);
     if (I.op_stats && (I.frame % 120) == 0) I.print_op_stats();
@@ -1500,7 +1539,9 @@ void Renderer::process_dl(uint32_t dl_addr) {
         }
     }
     if (!I.cfg.dump_dir.empty()) I.save_backgrounds();
-    if (I.tracing) I.trace_done = true; // one display list per run
+    static const long trace_lists = getenv("NM_GLES_TRACE_LISTS") ? atol(getenv("NM_GLES_TRACE_LISTS")) : 1;
+    static long traced = 0;
+    if (I.tracing && ++traced >= trace_lists) I.trace_done = true; // NM_GLES_TRACE_LISTS lists per run
     I.tracing = false;
     I.leave_framebuffer();
     I.evict_textures();
