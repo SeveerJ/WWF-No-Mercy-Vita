@@ -18,7 +18,7 @@ namespace nm::perf {
         double gfx_pct = 0;           // share of a core
     };
     void install();                   // registers the phase sink
-    void add_gfx(int64_t ns);         // a display list drawn by the backend
+    void add_gfx(int64_t ns, int texture_uploads = 0); // a display list drawn by the backend
     // Closes the current window if a second has passed; returns true and fills `out` then.
     bool update(Window& out);
     std::string summary(const Window& w);

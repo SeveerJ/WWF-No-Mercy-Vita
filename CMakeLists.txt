@@ -60,7 +60,7 @@ set(NM_APP_SOURCES
     "${NM_GAME_DIR}/src/main/register_overlays.cpp"
     "${NM_GAME_DIR}/rsp/nomercy_audio.cpp")
 if (VITA)
-    list(APPEND NM_APP_SOURCES vita/vita_backend.cpp vita/vita_mod_stubs.cpp)
+    list(APPEND NM_APP_SOURCES vita/vita_backend.cpp vita/vita_mod_stubs.cpp vita/nm_controls.cpp)
     set(NM_EXE NoMercyRecompiled)
 else()
     list(APPEND NM_APP_SOURCES headless/headless_backend.cpp)

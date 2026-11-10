@@ -128,6 +128,7 @@ struct Framebuffer {
     uint32_t addr = 0; int width = 0, height = 0, siz = 0;
     GLuint fbo = 0, tex = 0, depth = 0;
     uint64_t last_drawn = 0;
+    uint64_t bound_serial = 0; // bumped each time it becomes the render target
     bool presented = false;   // the VI has shown it: a real screen buffer, kept on the GPU only
     bool direct_shown = false; // drawn straight to the screen at least once
     bool dirty = false;       // drawn into since it was bound
@@ -205,6 +206,10 @@ struct Renderer::Impl {
     std::unordered_map<uint64_t, ShaderProgram> programs;
     std::unordered_map<uint64_t, CachedTexture> textures;
     std::deque<Framebuffer> framebuffers; // deque: pointers stay valid as it grows
+    uint64_t bind_serial = 0;
+    // The screen image last shown, and its bind serial then: if the game starts its next frame in
+    // that image before the VI has moved off it, showing it again would show a half-drawn frame.
+    uint32_t shown_addr = ~0u; uint64_t shown_serial = 0; int shown_held = 0;
     Framebuffer* current_fb = nullptr;
     bool pending_depth_clear = false;
     GLuint white_tex = 0;
@@ -430,6 +435,7 @@ struct Renderer::Impl {
         if (cimg_addr == zimg_addr) return; // depth image: handled by fills
         Framebuffer* f = get_framebuffer(cimg_addr, cimg_width);
         current_fb = f;
+        f->bound_serial = ++bind_serial;
         if (cfg.direct_to_screen && f->presented) {
             // A screen buffer: draw straight to the display, letterboxed 4:3. No FBO, no extra copy.
             target_display = true;
@@ -1551,6 +1557,22 @@ void Renderer::process_dl(uint32_t dl_addr) {
     I.last = I.stats;
 }
 
+bool Renderer::screen_ready(uint32_t vi_origin) {
+    Impl& I = *impl;
+    uint32_t origin = vi_origin & 0x7FFFFF;
+    const Framebuffer* best = nullptr;
+    for (auto& f : I.framebuffers) {
+        uint32_t size = (uint32_t)f.width * f.height * 2;
+        if (origin >= f.addr && origin < f.addr + size && (!best || f.addr > best->addr)) best = &f;
+    }
+    if (!best) return true;
+    // Still the image last shown, but the game has started drawing into it again: wait for the VI
+    // to move to the finished one (up to ~8 VIs, in case a screen really draws in place).
+    if (best->addr == I.shown_addr && best->bound_serial != I.shown_serial && ++I.shown_held < 8) return false;
+    I.shown_addr = best->addr; I.shown_serial = best->bound_serial; I.shown_held = 0;
+    return true;
+}
+
 bool Renderer::present(uint32_t vi_origin) {
     Impl& I = *impl;
     static const bool logp = getenv("NM_LOG_PRESENT") != nullptr;
@@ -1613,7 +1635,9 @@ const Stats& Renderer::last_stats() const { return impl->last; }
 
 void Renderer::draw_overlay(const uint32_t* rgba, int w, int h, int x, int y, int scale, bool changed) {
     Impl& I = *impl;
-    static GLuint tex = 0;
+    // One texture per caller's pixel buffer (the timings overlay and the controls menu).
+    static std::unordered_map<const uint32_t*, GLuint> textures;
+    GLuint& tex = textures[rgba];
     if (!tex) {
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);

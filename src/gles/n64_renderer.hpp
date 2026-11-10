@@ -38,6 +38,8 @@ namespace n64gfx {
         void process_dl(uint32_t dl_addr);
         // Draws the colour image at the given VI origin to the default framebuffer, letterboxed.
         // Returns false if no matching image has been drawn yet.
+        // false while the VI still shows an image the game has started redrawing (don't present yet)
+        bool screen_ready(uint32_t vi_origin);
         bool present(uint32_t vi_origin);
         // After a frame's display lists: true if they drew to the display, which must then be swapped.
         bool end_frame();

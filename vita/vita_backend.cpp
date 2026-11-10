@@ -36,6 +36,7 @@
 #include "nm_game.hpp"
 #include "nm_perf.hpp"
 #include "font5x7.h"
+#include "nm_controls.hpp"
 #include "librecomp/rsp.hpp"
 #include <vitaGL.h>
 #include "gles/n64_renderer.hpp"
@@ -43,6 +44,11 @@
 // Thread stacks: the runtime runs every N64 thread on its own host thread.
 extern "C" unsigned int _pthread_stack_default_user = 1024 * 1024;
 // Heap: stored ROM (32 MB), RDRAM (17 MB), the ROM read for validation, and everything else.
+#if !defined(NM_VITA_LOG_TO_TTY)
+static void log_flush_now();
+#else
+static void log_flush_now() {}
+#endif
 extern "C" unsigned int _newlib_heap_size_user = 200 * 1024 * 1024;
 
 extern "C" void tnt_vita_register_thread(const char* name);
@@ -253,9 +259,10 @@ namespace {
     }
 
     // ---- Input ----
-    // Cross = A (grapple), Square = B (strike), Circle = C-Down (run), Triangle = C-Up,
-    // L = L, R = R (block), START = START, SELECT = Z, D-pad and left stick = D-pad (movement),
-    // right stick = N64 analog stick (taunts), rear touch pad left/right half = C-Left/C-Right.
+    // Remappable (controls.ini, or in game with SELECT + START). Defaults: Cross = A (grapple),
+    // Square = B (strike), Circle = C-Down (run), Triangle = C-Up, L = L, R = R (block), START,
+    // SELECT = Z, D-pad and left stick = D-pad (movement), right stick = N64 analog stick (taunts),
+    // rear touch pad left/right half = C-Left/C-Right.
     std::mutex input_mutex;
     uint16_t cur_buttons = 0;
     // Buttons pressed since the game last read the controller. The game reads it once per frame,
@@ -269,33 +276,105 @@ namespace {
         float f = (int(v) - 128) / 127.0f;
         return std::fabs(f) < 0.2f ? 0.0f : std::clamp(f, -1.0f, 1.0f);
     }
+    // ---- Controls menu (SELECT + START) ----
+    nm::controls::Menu menu;
+    bool menu_wait_release = false;   // just opened: ignore buttons until all are let go
+    constexpr int MENU_W = 246, MENU_H = 252, MENU_SCALE = 2;
+    std::vector<uint32_t> menu_px(MENU_W * MENU_H);
+    bool menu_dirty = false;          // a new menu image to show (forces a present)
+
+    void menu_render() {
+        int highlight = -1;
+        std::vector<std::string> lines = menu.lines(highlight);
+        std::fill(menu_px.begin(), menu_px.end(), 0xE0201810u); // dark, nearly opaque
+        int y = 4;
+        for (int i = 0; i < (int)lines.size(); i++) {
+            uint32_t colour = i == 0 ? 0xFF40D0FFu : 0xFFFFFFFFu; // title in yellow (ABGR)
+            if (i == highlight) {
+                for (int r = y - 1; r < y + 8 && r < MENU_H; r++) for (int c = 2; c < MENU_W - 2; c++) menu_px[r * MENU_W + c] = 0xFF905020u;
+            }
+            int x = 4;
+            for (char ch : lines[i]) {
+                if (ch != ' ') {
+                    const uint8_t* g = tnt_font::glyph((char)std::toupper((unsigned char)ch));
+                    if (!g) g = tnt_font::glyph('?');
+                    for (int r = 0; r < 7; r++) for (int c = 0; c < 5; c++)
+                        if ((g[r] & (0x10 >> c)) && x + c < MENU_W && y + r < MENU_H) menu_px[(y + r) * MENU_W + x + c] = colour;
+                }
+                x += 6;
+            }
+            y += 9;
+        }
+    }
+
+    std::filesystem::path controls_file() { return nm::data_folder().parent_path() / "controls.ini"; }
+
     void sample_inputs() {
+        using namespace nm::controls;
         SceCtrlData pad{};
         sceCtrlPeekBufferPositive(0, &pad, 1);
-        uint16_t b = 0;
-        auto map = [&](uint32_t vita, uint16_t n64) { if (pad.buttons & vita) b |= n64; };
-        map(SCE_CTRL_UP, N64_DU); map(SCE_CTRL_DOWN, N64_DD); map(SCE_CTRL_LEFT, N64_DL); map(SCE_CTRL_RIGHT, N64_DR);
-        map(SCE_CTRL_CROSS, N64_A); map(SCE_CTRL_SQUARE, N64_B); map(SCE_CTRL_CIRCLE, N64_CD); map(SCE_CTRL_TRIANGLE, N64_CU);
-        map(SCE_CTRL_LTRIGGER, N64_L); map(SCE_CTRL_RTRIGGER, N64_R);
-        map(SCE_CTRL_START, N64_START); map(SCE_CTRL_SELECT, N64_Z);
-        static bool combo_down = false;
-        bool combo = (pad.buttons & SCE_CTRL_SELECT) && (pad.buttons & SCE_CTRL_TRIANGLE);
-        if (combo && !combo_down) overlay_on = !overlay_on.load();
-        combo_down = combo;
-        if (combo) b &= ~(N64_Z | N64_CU);
-        float lx = stick(pad.lx), ly = stick(pad.ly);
-        if (ly < -0.6f) b |= N64_DU; if (ly > 0.6f) b |= N64_DD;
-        if (lx < -0.6f) b |= N64_DL; if (lx > 0.6f) b |= N64_DR;
+        uint32_t src = 0;
+        auto add = [&](uint32_t vita, Source s) { if (pad.buttons & vita) src |= 1u << s; };
+        add(SCE_CTRL_CROSS, CROSS); add(SCE_CTRL_CIRCLE, CIRCLE); add(SCE_CTRL_SQUARE, SQUARE); add(SCE_CTRL_TRIANGLE, TRIANGLE);
+        add(SCE_CTRL_LTRIGGER, L); add(SCE_CTRL_RTRIGGER, R); add(SCE_CTRL_START, START); add(SCE_CTRL_SELECT, SELECT);
+        add(SCE_CTRL_UP, DPAD_UP); add(SCE_CTRL_DOWN, DPAD_DOWN); add(SCE_CTRL_LEFT, DPAD_LEFT); add(SCE_CTRL_RIGHT, DPAD_RIGHT);
         SceTouchData touch{};
-        if (sceTouchPeek(SCE_TOUCH_PORT_BACK, &touch, 1) > 0) {
-            for (int i = 0; i < touch.reportNum; i++) b |= touch.report[i].x < 960 ? N64_CL : N64_CR; // back pad is 1920 wide
+        if (sceTouchPeek(SCE_TOUCH_PORT_BACK, &touch, 1) > 0)
+            for (int i = 0; i < touch.reportNum; i++) src |= 1u << (touch.report[i].x < 960 ? REAR_LEFT : REAR_RIGHT); // 1920 wide
+        if (sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1) > 0)
+            for (int i = 0; i < touch.reportNum; i++) src |= 1u << (touch.report[i].x < 960 ? FRONT_LEFT : FRONT_RIGHT);
+        float lx = stick(pad.lx), ly = stick(pad.ly), rx = stick(pad.rx), ry = stick(pad.ry);
+        bool sel = pad.buttons & SCE_CTRL_SELECT, start = pad.buttons & SCE_CTRL_START;
+
+        // SELECT + START opens / closes the controls menu (holding them 2 seconds still quits).
+        static bool menu_combo_down = false;
+        bool menu_combo = sel && start;
+        bool toggled = false;
+        if (menu_combo && !menu_combo_down) {
+            toggled = true;
+            if (!menu.open) { menu.open = true; menu.cursor = 0; menu.status.clear(); menu_wait_release = true; }
+            else { menu.open = false; save(controls_file()); }
+            std::lock_guard lock{ overlay_mutex };
+            menu_render(); menu_dirty = true;
         }
+        menu_combo_down = menu_combo;
+
+        if (menu.open) {
+            uint32_t nav = 0;
+            if ((pad.buttons & SCE_CTRL_UP) || ly < -0.6f) nav |= NAV_UP;
+            if ((pad.buttons & SCE_CTRL_DOWN) || ly > 0.6f) nav |= NAV_DOWN;
+            if ((pad.buttons & SCE_CTRL_LEFT) || lx < -0.6f) nav |= NAV_LEFT;
+            if ((pad.buttons & SCE_CTRL_RIGHT) || lx > 0.6f) nav |= NAV_RIGHT;
+            if (pad.buttons & SCE_CTRL_CROSS) nav |= NAV_OK;
+            if (pad.buttons & (SCE_CTRL_CIRCLE | SCE_CTRL_START)) nav |= NAV_BACK;
+            if (menu_wait_release) { if (!nav && !sel) menu_wait_release = false; nav = 0; }
+            if (!toggled && nav) {
+                bool closed = menu.update(nav, now_ms());
+                if (closed) { save(controls_file()); printf("[controls] saved\n"); }
+                if (menu.changed) { std::lock_guard lock{ overlay_mutex }; menu_render(); menu_dirty = true; menu.changed = false; }
+            } else if (!nav) {
+                menu.update(0, now_ms());
+            }
+        }
+
+        // The game sees nothing while the menu is open (or while the combo is held).
+        Output out;
+        if (!menu.open && !menu_combo) out = translate(current(), src, lx, ly, rx, ry);
+        if (menu.open || menu_combo) src = 0;
+
+        // SELECT + TRIANGLE toggles the timings overlay.
+        static bool combo_down = false;
+        bool combo = sel && (pad.buttons & SCE_CTRL_TRIANGLE);
+        if (combo && !combo_down && !menu.open) overlay_on = !overlay_on.load();
+        combo_down = combo;
+        if (combo) out = Output{};
+        uint16_t b = out.buttons;
         {
             std::lock_guard lock{ input_mutex };
             cur_buttons = b;
             pressed_since_poll |= b;
-            cur_x = stick(pad.rx);
-            cur_y = -stick(pad.ry);
+            cur_x = out.x;
+            cur_y = out.y;
         }
         pad_buttons = b;
 
@@ -306,6 +385,7 @@ namespace {
             else if (now - quit_held_since > 2000) {
                 printf("[vita] quit requested\n");
                 fflush(stdout);
+                log_flush_now();
                 sceKernelExitProcess(0);
             }
         } else quit_held_since = 0;
@@ -350,7 +430,7 @@ namespace {
             const n64gfx::Stats& st = renderer->last_stats();
             gfx_draws += st.draw_calls; gfx_uploads += st.texture_uploads; gfx_tris += st.triangles;
             gfx_dl_us += usec_since(t0);
-            nm::perf::add_gfx((int64_t)usec_since(t0) * 1000);
+            nm::perf::add_gfx((int64_t)usec_since(t0) * 1000, (int)st.texture_uploads);
             if (renderer->end_frame()) {
                 auto t1 = std::chrono::steady_clock::now();
                 vglSwapBuffers(GL_FALSE);
@@ -362,9 +442,15 @@ namespace {
         void update_screen() override {
             ++vi_count;
             if (!renderer) return;
-            uint32_t origin = ultramodern::renderer::get_vi_regs()->VI_ORIGIN_REG;
+            // The image the game last finished (its latest osViSwapBuffer), not the VI register:
+            // that only moves at the next VI, and by then the game may already be redrawing
+            // the old one (shown half-drawn: the "models vanish for a moment" flicker).
+            uint32_t origin = (uint32_t)osViGetNextFramebuffer();
+            if (!origin) origin = ultramodern::renderer::get_vi_regs()->VI_ORIGIN_REG;
             uint64_t frames = dl_count.load();
-            if (frames == presented_frames && origin == presented_origin) return;
+            bool menu_redraw = menu_dirty;
+            if (frames == presented_frames && origin == presented_origin && !menu_redraw) return;
+            if (!renderer->screen_ready(origin)) return; // half-drawn: try again next VI
             presented_frames = frames; presented_origin = origin;
             auto t0 = std::chrono::steady_clock::now();
             if (!renderer->present(origin)) return;
@@ -373,6 +459,11 @@ namespace {
                 if (overlay_changed) overlay_render_text();
                 renderer->draw_overlay(overlay_px.data(), OV_W, OV_H, 8, 8, 1, overlay_changed);
                 overlay_changed = false;
+            }
+            if (menu.open || menu_redraw) {
+                std::lock_guard lock{ overlay_mutex };
+                if (menu.open) renderer->draw_overlay(menu_px.data(), MENU_W, MENU_H, (SCREEN_W - MENU_W * MENU_SCALE) / 2, (SCREEN_H - MENU_H * MENU_SCALE) / 2, MENU_SCALE, menu_dirty);
+                menu_dirty = false;
             }
             vglSwapBuffers(GL_FALSE);
             gfx_swaps++;
@@ -621,6 +712,7 @@ void nm_platform_early_init(int, char**) {
     scePowerSetGpuClockFrequency(222);
     scePowerSetGpuXbarClockFrequency(166);
     sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
+    sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
     if (!init_display()) printf("[vita] couldn't allocate the framebuffer\n");
     tnt_vita_register_thread("Main / status screen");
     nm::perf::install();
@@ -643,6 +735,7 @@ nm::Backend nm::make_backend(int, char**) {
     headroom_vis = st.audio_latency;
     volume_percent = st.volume;
     overlay_on = st.perf_overlay;
+    nm::controls::load(nm::data_folder().parent_path() / "controls.ini");
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
     audio_running = true;
     audio_thread = std::thread{ audio_thread_func };
@@ -659,23 +752,31 @@ nm::Backend nm::make_backend(int, char**) {
 }
 
 #if !defined(NM_VITA_LOG_TO_TTY)
-// printf -> log.txt in batches (at most 4 writes a second), appended and closed each time:
-// the Vita only updates a file's size when it is closed.
+// printf -> log.txt in batches, appended and closed each time (the Vita only updates a file's size
+// when it is closed). The writing happens on a low-priority thread of its own: a memory card write
+// can take tens of milliseconds, and doing it inside printf stalled whichever game thread printed.
 static std::mutex log_mutex;
 static std::string log_pending;
-static void log_write(const char* text, size_t len) {
-    std::lock_guard lock{ log_mutex };
-    log_pending.append(text, len);
-    static uint64_t last_flush = 0;
-    uint64_t t = sceKernelGetProcessTimeWide();
-    if (t - last_flush < 250000 && log_pending.size() < 16384) return;
-    last_flush = t;
-    size_t nl = log_pending.rfind('\n');
-    if (nl == std::string::npos && log_pending.size() < 4096) return;
-    size_t n = nl == std::string::npos ? log_pending.size() : nl + 1;
+static void log_flush_now() {
+    std::string out;
+    { std::lock_guard lock{ log_mutex }; out.swap(log_pending); }
+    if (out.empty()) return;
     SceUID fd = sceIoOpen(NM_VITA_APP_DIR "/log.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0666);
-    if (fd >= 0) { sceIoWrite(fd, log_pending.data(), n); sceIoClose(fd); }
-    log_pending.erase(0, n);
+    if (fd >= 0) { sceIoWrite(fd, out.data(), out.size()); sceIoClose(fd); }
+}
+static int log_thread_main(SceSize, void*) {
+    for (;;) { sceKernelDelayThread(250000); log_flush_now(); }
+    return 0;
+}
+static void log_write(const char* text, size_t len) {
+    static bool started = false;
+    std::lock_guard lock{ log_mutex };
+    if (log_pending.size() < (4u << 20)) log_pending.append(text, len); // drop if the card can't keep up
+    if (!started) {
+        started = true;
+        SceUID th = sceKernelCreateThread("Log writer", log_thread_main, 0xC0, 0x4000, 0, 0, nullptr);
+        if (th >= 0) sceKernelStartThread(th, 0, nullptr);
+    }
 }
 extern "C" int vprintf(const char* fmt_str, va_list ap) {
     char buf[1024];

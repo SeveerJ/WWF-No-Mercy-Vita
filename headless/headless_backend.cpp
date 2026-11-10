@@ -198,9 +198,14 @@ namespace {
         void update_screen() override {
             ++vi_count;
             if (!renderer) return;
-            uint32_t origin = ultramodern::renderer::get_vi_regs()->VI_ORIGIN_REG;
+            // The image the game last finished (its latest osViSwapBuffer), not the VI register:
+            // that only moves at the next VI, and by then the game may already be redrawing
+            // the old one (shown half-drawn: the "models vanish for a moment" flicker).
+            uint32_t origin = (uint32_t)osViGetNextFramebuffer();
+            if (!origin) origin = ultramodern::renderer::get_vi_regs()->VI_ORIGIN_REG;
             uint64_t frames = dl_count.load();
             if (frames == presented_frames && origin == presented_origin) return;
+            if (!renderer->screen_ready(origin)) return; // half-drawn: try again next VI
             presented_frames = frames; presented_origin = origin;
             static int logged = 0;
             if (logged++ < 3) {
