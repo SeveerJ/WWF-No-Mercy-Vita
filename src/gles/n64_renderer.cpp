@@ -1553,6 +1553,8 @@ void Renderer::process_dl(uint32_t dl_addr) {
 
 bool Renderer::present(uint32_t vi_origin) {
     Impl& I = *impl;
+    static const bool logp = getenv("NM_LOG_PRESENT") != nullptr;
+    if (logp) printf("[present] list %llu origin %06X drawing %06X\n", (unsigned long long)I.frame, vi_origin & 0x7FFFFF, I.cimg_addr);
     I.tex_memo.clear(); // textures are re-checked against RDRAM once per shown frame
     I.flush();
     uint32_t origin = vi_origin & 0x7FFFFF;
