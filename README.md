@@ -43,6 +43,25 @@ Hold **START + SELECT** for 2 seconds to quit. **SELECT + TRIANGLE** toggles the
 - Occasional brief stutters.
 - Models can disappear for a single frame now and then (fixed in the next build).
 
+## Roadmap
+
+### Next build (in testing)
+- **Fully remappable controls.** An in-game controls menu opened with SELECT + START:
+  - assign any N64 button (or nothing) to every Vita button and the D-pad
+  - the front and rear touch pads, split into left and right halves
+  - set each stick to the D-pad, the N64 analog stick, the C-buttons, or off
+  - "Reset to defaults" option, and fixed menu navigation so a layout can't lock you out
+  - layout saved to `ux0:data/NoMercyRecompiled/controls.ini`, which can also be edited by hand
+- Fix for models vanishing for a single frame (in matches and on the pause screen)
+- Smoother play: `log.txt` is written in the background instead of briefly stalling the game, and long
+  frames are recorded as `[hitch]` lines to help track down the remaining stutters
+
+### Planned
+- Better 4-player match performance (fewer draw calls per frame)
+- Graphics options: smooth screen filtering for more readable text, and possibly a higher internal resolution
+- Fixes for whatever the stutter logs show
+- Widescreen (optional, off by default; likely costs some speed)
+
 ## Building from source
 
 This repo holds no game code. It builds against a
