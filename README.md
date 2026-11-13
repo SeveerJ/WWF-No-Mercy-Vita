@@ -56,11 +56,6 @@ Hold **START + SELECT** for 2 seconds to quit. **SELECT + TRIANGLE** toggles the
 - Smoother play: `log.txt` is written in the background instead of briefly stalling the game, and long
   frames are recorded as `[hitch]` lines to help track down the remaining stutters
 
-### Planned
-- Better 4-player match performance (fewer draw calls per frame)
-- Graphics options: smooth screen filtering for more readable text, and possibly a higher internal resolution
-- Fixes for whatever the stutter logs show
-- Widescreen (optional, off by default; likely costs some speed)
 
 ## Building from source
 
@@ -87,7 +82,7 @@ available with `-DNM_HOST=ON -DNM_KHR_DIR=<EGL/GLES2 headers and libs>`.
 - Rinnegatamante: vitaGL
 - The mupen64plus team: RSP audio HLE (`src/hle_audio`)
 - The VitaSDK team
-- CodebreakerDX: testing
+- u/CodebreakerDX: testing
 
 ## Licence
 
