@@ -22,6 +22,15 @@ Settings (`settings.ini`), saves, save backups and `log.txt` are all in `ux0:dat
 
 ## Controls
 
+Fully remappable. Press **SELECT + START** in game to open the controls menu: up/down picks a row,
+left/right changes it, CIRCLE saves and closes. Every button, the D-pad, both touch panels (left and right
+halves) and both sticks can be assigned; each stick can be the D-pad, the N64 analog stick, the C-buttons
+or off. The menu's own navigation is fixed, so a layout can't lock you out, and "Reset to defaults" is in
+the list. The game keeps running while the menu is open, so pause first. The layout is saved in
+`ux0:data/NoMercyRecompiled/controls.ini`.
+
+Defaults:
+
 | Vita | N64 | In game |
 |---|---|---|
 | Cross | A | Grapple |
@@ -34,14 +43,15 @@ Settings (`settings.ini`), saves, save backups and `log.txt` are all in `ux0:dat
 | D-pad / left stick | D-pad | Move |
 | Right stick | Analog stick | Taunts / finishers |
 | Rear touch pad, left / right half | C-Left / C-Right | |
+| Front touch pad | (nothing) | |
 
 Hold **START + SELECT** for 2 seconds to quit. **SELECT + TRIANGLE** toggles the timings overlay.
 
 ## Known issues
 
 - 4-player matches can drop to around 20 fps.
-- Occasional brief stutters.
-- Models can disappear for a single frame now and then (fixed in the next build).
+- Occasional brief stutters. Long frames are now recorded in `log.txt` as `[hitch]` lines; please include
+  the log when reporting them.
 
 ## Building from source
 
